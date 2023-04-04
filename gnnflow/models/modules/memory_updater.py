@@ -98,3 +98,60 @@ class GRUMemeoryUpdater(torch.nn.Module):
             "last_updated_memory": last_updated_memory,
             "last_updated_ts": last_updated_ts
         }
+
+
+class TransformerMemoryUpdater(torch.nn.Module):
+
+    def __init__(self, memory_param, dim_in, dim_out, dim_time, train_param):
+        super(TransformerMemoryUpdater, self).__init__()
+        self.memory_param = memory_param
+        self.dim_time = dim_time
+        self.att_h = memory_param['attention_head']
+        if dim_time > 0:
+            self.time_enc = TimeEncode(dim_time)
+        self.w_q = torch.nn.Linear(dim_out, dim_out)
+        self.w_k = torch.nn.Linear(dim_in + dim_time, dim_out)
+        self.w_v = torch.nn.Linear(dim_in + dim_time, dim_out)
+        self.att_act = torch.nn.LeakyReLU(0.2)
+        self.layer_norm = torch.nn.LayerNorm(dim_out)
+        self.mlp = torch.nn.Linear(dim_out, dim_out)
+        self.dropout = torch.nn.Dropout(train_param['dropout'])
+        self.att_dropout = torch.nn.Dropout(train_param['att_dropout'])
+        self.last_updated_memory = None
+        self.last_updated_ts = None
+        self.last_updated_nid = None
+
+    def forward(self, mfg):
+        for b in mfg:
+            Q = self.w_q(b.srcdata['mem']).reshape(
+                (b.num_src_nodes(), self.att_h, -1))
+            mails = b.srcdata['mem_input'].reshape(
+                (b.num_src_nodes(), self.memory_param['mailbox_size'], -1))
+            if self.dim_time > 0:
+                time_feat = self.time_enc(b.srcdata['ts'][:, None] - b.srcdata['mail_ts']).reshape(
+                    (b.num_src_nodes(), self.memory_param['mailbox_size'], -1))
+                mails = torch.cat([mails, time_feat], dim=2)
+            K = self.w_k(mails).reshape(
+                (b.num_src_nodes(), self.memory_param['mailbox_size'], self.att_h, -1))
+            V = self.w_v(mails).reshape(
+                (b.num_src_nodes(), self.memory_param['mailbox_size'], self.att_h, -1))
+            att = self.att_act((Q[:, None, :, :]*K).sum(dim=3))
+            att = torch.nn.functional.softmax(att, dim=1)
+            att = self.att_dropout(att)
+            rst = (att[:, :, :, None]*V).sum(dim=1)
+            rst = rst.reshape((rst.shape[0], -1))
+            rst += b.srcdata['mem']
+            rst = self.layer_norm(rst)
+            rst = self.mlp(rst)
+            rst = self.dropout(rst)
+            rst = torch.nn.functional.relu(rst)
+            b.srcdata['h'] = rst
+            self.last_updated_memory = rst.detach().clone()
+            self.last_updated_nid = b.srcdata['ID'].detach().clone()
+            self.last_updated_ts = b.srcdata['ts'].detach().clone()
+
+        return {
+            "last_updated_nid": self.last_updated_nid,
+            "last_updated_memory": self.last_updated_memory,
+            "last_updated_ts": self.last_updated_ts
+        }
