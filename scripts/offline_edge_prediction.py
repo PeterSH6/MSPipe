@@ -33,7 +33,7 @@ from gnnflow.utils import (DstRandEdgeSampler, EarlyStopMonitor, NegLinkSampler,
                            mfgs_to_cuda, node_to_dgl_blocks)
 
 datasets = ['REDDIT', 'GDELT', 'LASTFM', 'MAG', 'MOOC', 'WIKI']
-model_names = ['TGN', 'TGAT', 'DySAT', 'GRAPHSAGE', 'GAT']
+model_names = ['TGN', 'TGAT', 'DySAT', 'GRAPHSAGE', 'GAT', 'APAN', 'JODIE']
 cache_names = sorted(name for name in caches.__dict__
                      if not name.startswith("__")
                      and callable(caches.__dict__[name]))
@@ -122,7 +122,7 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
             else:
                 mfgs = node_to_dgl_blocks(target_nodes, ts)
                 block = None
-            mfgs_to_cuda(mfgs)
+            mfgs_to_cuda(mfgs, device)
             mfgs = cache.fetch_feature(
                 mfgs, eid)
 
@@ -417,11 +417,12 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
             # Sample
             sample_start_time = time.time()
             if sampler is not None:
-                if type(model).__name__ == 'APAN':
+                model_name = type(model.module).__name__ if args.distributed else type(model).__name__
+                if model_name == 'APAN':
                     mfgs = node_to_dgl_blocks(target_nodes, ts)
-                    pos_target = len(target_nodes) * 2 // 3
+                    target_pos = len(target_nodes) * 2 // 3
                     block = sampler.sample(
-                        target_nodes[:pos_target], ts[:pos_target], reverse=True)[0][0]
+                        target_nodes[:target_pos], ts[:target_pos], reverse=True)[0][0]
                 else:
                     mfgs = sampler.sample(target_nodes, ts)
                     block = None

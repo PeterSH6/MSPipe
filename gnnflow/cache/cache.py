@@ -333,75 +333,76 @@ class Cache:
             hit_ratio_sum = 0
             for mfg in mfgs:
                 for b in mfg:
-                    edges = b.edata['ID']
-                    assert isinstance(edges, torch.Tensor)
-                    if len(edges) == 0:
-                        continue
+                    if b.num_src_nodes() > b.num_dst_nodes():
+                        edges = b.edata['ID']
+                        assert isinstance(edges, torch.Tensor)
+                        if len(edges) == 0:
+                            continue
 
-                    cache_mask = self.cache_edge_flag[edges]
-                    hit_ratio = torch.sum(cache_mask) / len(edges)
-                    hit_ratio_sum += hit_ratio
+                        cache_mask = self.cache_edge_flag[edges]
+                        hit_ratio = torch.sum(cache_mask) / len(edges)
+                        hit_ratio_sum += hit_ratio
 
-                    edge_feature = torch.zeros(len(edges), self.dim_edge_feat,
-                                               dtype=torch.float32, device=self.device)
+                        edge_feature = torch.zeros(len(edges), self.dim_edge_feat,
+                                                dtype=torch.float32, device=self.device)
 
-                    # fetch the cached features
-                    cached_edge_index = self.cache_edge_map[edges[cache_mask]]
-                    edge_feature[cache_mask] = self.cache_edge_buffer[cached_edge_index]
-                    # fetch the uncached features
-                    uncached_mask = ~cache_mask
-                    uncached_edge_id = edges[uncached_mask]
+                        # fetch the cached features
+                        cached_edge_index = self.cache_edge_map[edges[cache_mask]]
+                        edge_feature[cache_mask] = self.cache_edge_buffer[cached_edge_index]
+                        # fetch the uncached features
+                        uncached_mask = ~cache_mask
+                        uncached_edge_id = edges[uncached_mask]
 
-                    if len(uncached_edge_id) > 0:
-                        if self.distributed:
-                            # edge_features need to convert to nid first.
-                            # get the first_indices of the origin tensor in unique
-                            # pytorch should have this option like numpy !!
-                            uncached_edge_id_unique, uncached_edge_id_unique_index, counts = torch.unique(
-                                uncached_edge_id, return_inverse=True, return_counts=True)
-                            _, ind_sorted = torch.sort(
-                                uncached_edge_id_unique_index, stable=True)
-                            cum_sum = counts.cumsum(0)
-                            cum_sum = torch.cat(
-                                (torch.tensor([0]).cuda(), cum_sum[:-1]))
-                            first_indicies = ind_sorted[cum_sum]
+                        if len(uncached_edge_id) > 0:
+                            if self.distributed:
+                                # edge_features need to convert to nid first.
+                                # get the first_indices of the origin tensor in unique
+                                # pytorch should have this option like numpy !!
+                                uncached_edge_id_unique, uncached_edge_id_unique_index, counts = torch.unique(
+                                    uncached_edge_id, return_inverse=True, return_counts=True)
+                                _, ind_sorted = torch.sort(
+                                    uncached_edge_id_unique_index, stable=True)
+                                cum_sum = counts.cumsum(0)
+                                cum_sum = torch.cat(
+                                    (torch.tensor([0]).cuda(), cum_sum[:-1]))
+                                first_indicies = ind_sorted[cum_sum]
 
-                            src_nid = b.srcdata['ID'][b.edges()[1]]
-                            uncached_eid_to_nid = src_nid[uncached_mask]
-                            # use the same indices as eid when unique
-                            uncached_eid_to_nid_unique = uncached_eid_to_nid[first_indicies].cpu(
-                            )
-                            if self.pinned_efeat_buffs is not None:
-                                self.pinned_efeat_buffs[
-                                    i][:uncached_edge_id_unique.shape[0]] = self.kvstore_client.pull(
-                                        uncached_edge_id_unique.cpu(), mode='edge', nid=uncached_eid_to_nid_unique)
-                                uncached_edge_feature = self.pinned_efeat_buffs[i][:uncached_edge_id_unique.shape[0]].to(
-                                    self.device, non_blocking=True).float()
+                                src_nid = b.srcdata['ID'][b.edges()[1]]
+                                uncached_eid_to_nid = src_nid[uncached_mask]
+                                # use the same indices as eid when unique
+                                uncached_eid_to_nid_unique = uncached_eid_to_nid[first_indicies].cpu(
+                                )
+                                if self.pinned_efeat_buffs is not None:
+                                    self.pinned_efeat_buffs[
+                                        i][:uncached_edge_id_unique.shape[0]] = self.kvstore_client.pull(
+                                            uncached_edge_id_unique.cpu(), mode='edge', nid=uncached_eid_to_nid_unique)
+                                    uncached_edge_feature = self.pinned_efeat_buffs[i][:uncached_edge_id_unique.shape[0]].to(
+                                        self.device, non_blocking=True).float()
+                                else:
+                                    uncached_edge_feature = self.kvstore_client.pull(
+                                        uncached_edge_id_unique.cpu(), mode='edge', nid=uncached_eid_to_nid_unique).to(self.device).float()
                             else:
-                                uncached_edge_feature = self.kvstore_client.pull(
-                                    uncached_edge_id_unique.cpu(), mode='edge', nid=uncached_eid_to_nid_unique).to(self.device).float()
-                        else:
-                            uncached_edge_id_unique, uncached_edge_id_unique_index = torch.unique(
-                                uncached_edge_id, return_inverse=True)
-                            if self.pinned_efeat_buffs is not None:
-                                torch.index_select(self.edge_feats, 0, uncached_edge_id_unique.to('cpu'),
-                                                   out=self.pinned_efeat_buffs[i][:uncached_edge_id_unique.shape[0]])
-                                uncached_edge_feature = self.pinned_efeat_buffs[i][:uncached_edge_id_unique.shape[0]].to(
-                                    self.device, non_blocking=True)
-                            else:
+                                uncached_edge_id_unique, uncached_edge_id_unique_index = torch.unique(
+                                    uncached_edge_id, return_inverse=True)
+                                if self.pinned_efeat_buffs is not None:
+                                    torch.index_select(self.edge_feats, 0, uncached_edge_id_unique.to('cpu'),
+                                                    out=self.pinned_efeat_buffs[i][:uncached_edge_id_unique.shape[0]])
+                                    uncached_edge_feature = self.pinned_efeat_buffs[i][:uncached_edge_id_unique.shape[0]].to(
+                                        self.device, non_blocking=True)
+                                else:
 
-                                uncached_edge_feature = self.edge_feats[uncached_edge_id_unique.cpu()].to(
-                                    self.device, non_blocking=True)
+                                    uncached_edge_feature = self.edge_feats[uncached_edge_id_unique.cpu()].to(
+                                        self.device, non_blocking=True)
 
-                        edge_feature[uncached_mask] = uncached_edge_feature[uncached_edge_id_unique_index]
+                            edge_feature[uncached_mask] = uncached_edge_feature[uncached_edge_id_unique_index]
 
-                    i += 1
-                    b.edata['f'] = edge_feature
+                        i += 1
+                        b.edata['f'] = edge_feature
 
-                    if update_cache and len(uncached_edge_id) > 0:
-                        self.update_edge_cache(cached_edge_index=cached_edge_index,
-                                               uncached_edge_id=uncached_edge_id_unique,
-                                               uncached_edge_feature=uncached_edge_feature)
+                        if update_cache and len(uncached_edge_id) > 0:
+                            self.update_edge_cache(cached_edge_index=cached_edge_index,
+                                                uncached_edge_id=uncached_edge_id_unique,
+                                                uncached_edge_feature=uncached_edge_feature)
 
             self.cache_edge_ratio = hit_ratio_sum / i if i > 0 else 0
 

@@ -47,7 +47,7 @@ class APAN(torch.nn.Module):
         # Memory updater
         self.memory_updater = TransformerMemoryUpdater(
             mailbox_size, att_head,
-            2 * dim_node + dim_edge,
+            2 * dim_memory + dim_edge,
             dim_memory,
             dim_time,
             dropout, att_dropout)
@@ -65,7 +65,6 @@ class APAN(torch.nn.Module):
         self.edge_predictor = EdgePredictor(dim_memory)
 
     def forward(self, mfgs, neg_samples=1):
-        super().forward(mfgs)
         out = list()
         for l in range(self.gnn_layer):
             for h in range(self.num_snapshots):
@@ -80,7 +79,7 @@ class APAN(torch.nn.Module):
         else:
             out = torch.stack(out, dim=0)
             out = self.combiner(out)[0][-1, :, :]
-        return self.edge_predictor(out, neg_samples=neg_samples)
+        return self.edge_predictor(out)
 
     def get_emb(self, mfgs):
         self.memory_updater(mfgs[0])

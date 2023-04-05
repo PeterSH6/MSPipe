@@ -71,10 +71,12 @@ class Memory:
                 self.node_memory_ts = torch.zeros(
                     num_nodes, dtype=torch.float32, device=device)
                 self.mailbox = torch.zeros(
-                    (num_nodes, self.dim_raw_message),
+                    (num_nodes, mailbox_size, self.dim_raw_message),
                     dtype=torch.float32, device=device)
                 self.mailbox_ts = torch.zeros(
-                    (num_nodes,), dtype=torch.float32, device=device)
+                    (num_nodes, mailbox_size), dtype=torch.float32, device=device)
+                self.next_mail_pos = torch.zeros(
+                    num_nodes, dtype=torch.long, device=device)
             else:
                 if local_rank == 0:
                     self.node_memory = create_shared_mem_array(
@@ -82,10 +84,10 @@ class Memory:
                     self.node_memory_ts = create_shared_mem_array(
                         'node_memory_ts', (num_nodes,), dtype=torch.float32)
                     self.mailbox = create_shared_mem_array(
-                        'mailbox', (num_nodes, self.dim_raw_message),
+                        'mailbox', (num_nodes, mailbox_size, self.dim_raw_message),
                         dtype=torch.float32)
                     self.mailbox_ts = create_shared_mem_array(
-                        'mailbox_ts', (num_nodes,), dtype=torch.float32)
+                        'mailbox_ts', (num_nodes, mailbox_size), dtype=torch.float32)
                     self.next_mail_pos = create_shared_mem_array(
                         'next_mail_pos', (num_nodes,), dtype=torch.long
                     )
@@ -106,9 +108,11 @@ class Memory:
                     self.node_memory_ts = get_shared_mem_array(
                         'node_memory_ts', (num_nodes,), torch.float32)
                     self.mailbox = get_shared_mem_array(
-                        'mailbox', (num_nodes, self.dim_raw_message), torch.float32)
+                        'mailbox', (num_nodes, mailbox_size, self.dim_raw_message), torch.float32)
                     self.mailbox_ts = get_shared_mem_array(
-                        'mailbox_ts', (num_nodes,), torch.float32)
+                        'mailbox_ts', (num_nodes, mailbox_size), torch.float32)
+                    self.next_mail_pos = get_shared_mem_array(
+                        'next_mail_pos', (num_nodes,), torch.long)
 
     def reset(self):
         """
@@ -324,8 +328,8 @@ class Memory:
             # update mailbox first
             if not self.distributed or torch.distributed.get_rank() == 0:
                 with self.lock:
-                    self.mailbox[nid_mail] = mail
-                    self.mailbox_ts[nid_mail] = mail_ts
+                    self.mailbox[nid_mail, self.next_mail_pos[nid_mail]] = mail
+                    self.mailbox_ts[nid_mail, self.next_mail_pos[nid_mail]] = mail_ts
                     # update mem
                     self.node_memory[nid] = mem
                     self.node_memory_ts[nid] = mem_ts

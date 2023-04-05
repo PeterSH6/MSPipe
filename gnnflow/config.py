@@ -55,7 +55,7 @@ _apan_default_config = {
     "use_memory": True,
     "dim_time": 100,
     "dim_embed": 100,
-    "dim_memory": 172,
+    "dim_memory": 100,
     "batch_size": 4000
 }
 

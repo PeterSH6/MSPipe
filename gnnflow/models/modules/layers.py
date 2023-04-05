@@ -4,6 +4,7 @@ This code is based on the implementation of TGL's layer module.
 Implementation at:
     https://github.com/amazon-research/tgl/blob/main/layers.py
 """
+import logging
 import dgl
 import dgl.function as fn
 import numpy as np
