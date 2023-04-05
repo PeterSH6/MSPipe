@@ -120,6 +120,7 @@ class RNNMemeoryUpdater(torch.nn.Module):
         self.dim_node = dim_node
         self.dim_time = dim_time
         self.dim_embed = dim_embed
+
         self.updater = torch.nn.RNNCell(
             self.dim_message + self.dim_time, dim_memory)
 

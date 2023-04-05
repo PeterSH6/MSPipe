@@ -4,7 +4,7 @@ This code is based on the implementation of TGL's layer module.
 Implementation at:
     https://github.com/amazon-research/tgl/blob/main/layers.py
 """
-import logging
+import math
 import dgl
 import dgl.function as fn
 import numpy as np
@@ -200,7 +200,7 @@ class EdgePredictor(torch.nn.Module):
 
 class MLP(torch.nn.Module):
     """
-    Node classification 
+    Node classification
     """
 
     def __init__(self, dim_in, dim_hid, num_class):

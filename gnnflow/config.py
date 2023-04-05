@@ -39,7 +39,7 @@ _tgn_default_config = {
     "dim_time": 100,
     "dim_embed": 100,
     "dim_memory": 172,
-    "batch_size": 4000
+    "batch_size": 600
 }
 
 _apan_default_config = {
@@ -56,7 +56,7 @@ _apan_default_config = {
     "dim_time": 100,
     "dim_embed": 100,
     "dim_memory": 100,
-    "batch_size": 4000
+    "batch_size": 600
 }
 
 _jodie_default_config = {
@@ -72,8 +72,8 @@ _jodie_default_config = {
     "use_memory": True,
     "dim_time": 100,
     "dim_embed": 100,
-    "dim_memory": 172,
-    "batch_size": 4000
+    "dim_memory": 100,
+    "batch_size": 600
 }
 
 _tgat_default_config = {

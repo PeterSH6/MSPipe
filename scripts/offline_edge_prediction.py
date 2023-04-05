@@ -44,7 +44,7 @@ parser.add_argument("--model", choices=model_names, required=True,
 parser.add_argument("--data", choices=datasets, required=True,
                     help="dataset:" + '|'.join(datasets))
 parser.add_argument("--epoch", help="maximum training epoch",
-                    type=int, default=5)
+                    type=int, default=100)
 parser.add_argument("--lr", help='learning rate', type=float, default=0.0001)
 parser.add_argument("--num-workers", help="num workers for dataloaders",
                     type=int, default=8)
@@ -111,11 +111,12 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
         total_loss = 0
         for target_nodes, ts, eid in dataloader:
             if sampler is not None:
-                if type(model).__name__ == 'APAN':
+                model_name = type(model.module).__name__ if args.distributed else type(model).__name__
+                if model_name == 'APAN':
                     mfgs = node_to_dgl_blocks(target_nodes, ts)
-                    pos_target = len(target_nodes) * 2 // 3
+                    target_pos = len(target_nodes) * 2 // 3
                     block = sampler.sample(
-                        target_nodes[:pos_target], ts[:pos_target], reverse=True)[0][0]
+                        target_nodes[:target_pos], ts[:target_pos], reverse=True)[0][0]
                 else:
                     mfgs = sampler.sample(target_nodes, ts)
                     block = None

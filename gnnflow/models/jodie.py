@@ -1,4 +1,4 @@
-from typing import Optional, Union
+from typing import Dict, Optional, Union
 import torch
 
 from gnnflow.distributed.kvstore import KVStoreClient
@@ -44,7 +44,7 @@ class JODIE(torch.nn.Module):
         self.memory_updater = RNNMemeoryUpdater(
             dim_node, dim_edge, dim_time, dim_embed, dim_memory)
 
-        self.dim_node_input = dim_node
+        self.dim_node_input = dim_embed
 
         self.layers = torch.nn.ModuleDict()
 
@@ -52,7 +52,7 @@ class JODIE(torch.nn.Module):
         for h in range(num_snapshots):
             self.layers['l0h' +
                         str(h)] = IdentityNormLayer(self.dim_node_input)
-            self.layers['l0h' + str(h) + 't'] = JODIETimeEmbedding(dim_node)
+            self.layers['l0h' + str(h) + 't'] = JODIETimeEmbedding(dim_embed)
 
         self.edge_predictor = EdgePredictor(dim_embed)
 
@@ -62,7 +62,7 @@ class JODIE(torch.nn.Module):
             for h in range(self.num_snapshots):
                 rst = self.layers['l' + str(l) + 'h' + str(h)](mfgs[l][h])
                 rst = self.layers['l0h' + str(h) + 't'](rst, mfgs[l]
-                                                        [h].dstdata['mem_ts'], mfgs[l][h].srcdata['ts'])
+                                                        [h].srcdata['mem_ts'], mfgs[l][h].srcdata['ts'])
 
                 if l != self.gnn_layer - 1:
                     mfgs[l + 1][h].srcdata['h'] = rst
@@ -92,3 +92,23 @@ class JODIE(torch.nn.Module):
             out = torch.stack(out, dim=0)
             out = self.combiner(out)[0][-1, :, :]
         return out
+
+    def reset(self):
+        if self.use_memory:
+            self.memory.reset()
+
+    def resize(self, num_nodes: int):
+        if self.use_memory:
+            self.memory.resize(num_nodes)
+
+    def has_memory(self):
+        return self.use_memory
+
+    def backup_memory(self) -> Dict:
+        if self.use_memory:
+            return self.memory.backup()
+        return {}
+
+    def restore_memory(self, backup: Dict):
+        if self.use_memory:
+            self.memory.restore(backup)
