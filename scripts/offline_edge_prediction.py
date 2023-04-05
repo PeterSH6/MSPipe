@@ -110,12 +110,19 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
     with torch.no_grad():
         total_loss = 0
         for target_nodes, ts, eid in dataloader:
-            if type(model).__name__ == 'APAN':
-                mfgs = node_to_dgl_blocks(target_nodes, ts)
-                block = sampler.sample(target_nodes, ts, reverse=True)[0][0]
+            if sampler is not None:
+                if type(model).__name__ == 'APAN':
+                    mfgs = node_to_dgl_blocks(target_nodes, ts)
+                    pos_target = len(target_nodes) * 2 // 3
+                    block = sampler.sample(
+                        target_nodes[:pos_target], ts[:pos_target], reverse=True)[0][0]
+                else:
+                    mfgs = sampler.sample(target_nodes, ts)
+                    block = None
             else:
-                mfgs = sampler.sample(target_nodes, ts)
+                mfgs = node_to_dgl_blocks(target_nodes, ts)
                 block = None
+            mfgs_to_cuda(mfgs)
             mfgs = cache.fetch_feature(
                 mfgs, eid)
 
@@ -296,7 +303,10 @@ def main():
                      memory_device=device, memory_shared=args.distributed)
     model.to(device)
 
-    sampler = TemporalSampler(dgraph, **model_config)
+    if type(model).__name__ == 'JODIE':
+        sampler = None
+    else:
+        sampler = TemporalSampler(dgraph, **model_config)
 
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
@@ -406,11 +416,17 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         for i, (target_nodes, ts, eid) in enumerate(train_loader):
             # Sample
             sample_start_time = time.time()
-            if type(model).__name__ == 'APAN':
-                mfgs = node_to_dgl_blocks(target_nodes, ts)
-                block = sampler.sample(target_nodes, ts, reverse=True)[0][0]
+            if sampler is not None:
+                if type(model).__name__ == 'APAN':
+                    mfgs = node_to_dgl_blocks(target_nodes, ts)
+                    pos_target = len(target_nodes) * 2 // 3
+                    block = sampler.sample(
+                        target_nodes[:pos_target], ts[:pos_target], reverse=True)[0][0]
+                else:
+                    mfgs = sampler.sample(target_nodes, ts)
+                    block = None
             else:
-                mfgs = sampler.sample(target_nodes, ts)
+                mfgs = node_to_dgl_blocks(target_nodes, ts)
                 block = None
             total_sampling_time += time.time() - sample_start_time
 

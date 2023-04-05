@@ -16,7 +16,7 @@ def get_default_config(model: str, dataset: str):
         Default configuration for the model and dataset.
     """
     model, dataset = model.lower(), dataset.lower()
-    assert model in ["tgn", "tgat", "dysat", "graphsage", "gat"] and dataset in [
+    assert model in ["tgn", "tgat", "dysat", "graphsage", "gat", "jodie", 'apan'] and dataset in [
         "wiki", "reddit", "mooc", "lastfm", "gdelt", "mag"], "Invalid model or dataset."
 
     mod = sys.modules[__name__]
@@ -26,6 +26,40 @@ def get_default_config(model: str, dataset: str):
 
 
 _tgn_default_config = {
+    "dropout": 0.1,
+    "att_head": 2,
+    "att_dropout": 0.1,
+    "num_layers": 1,
+    "fanouts": [10],
+    "sample_strategy": "recent",
+    "num_snapshots": 1,
+    "snapshot_time_window": 0,
+    "prop_time": False,
+    "use_memory": True,
+    "dim_time": 100,
+    "dim_embed": 100,
+    "dim_memory": 172,
+    "batch_size": 4000
+}
+
+_apan_default_config = {
+    "dropout": 0.1,
+    "att_head": 2,
+    "att_dropout": 0.1,
+    "num_layers": 1,
+    "fanouts": [10],
+    "sample_strategy": "recent",
+    "num_snapshots": 1,
+    "snapshot_time_window": 0,
+    "prop_time": False,
+    "use_memory": True,
+    "dim_time": 100,
+    "dim_embed": 100,
+    "dim_memory": 172,
+    "batch_size": 4000
+}
+
+_jodie_default_config = {
     "dropout": 0.1,
     "att_head": 2,
     "att_dropout": 0.1,
