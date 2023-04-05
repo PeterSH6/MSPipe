@@ -1,60 +1,68 @@
+from typing import Optional, Union
 import torch
 
-from .layers import *
-from .memory_updater import *
-from .base import Model
+from gnnflow.distributed.kvstore import KVStoreClient
+from gnnflow.models.modules.layers import EdgePredictor, IdentityNormLayer, JODIETimeEmbedding
+from gnnflow.models.modules.memory import Memory
+from gnnflow.models.modules.memory_updater import RNNMemeoryUpdater
 
 
-class JODIE(Model):
+class JODIE(torch.nn.Module):
 
-    def __init__(self, dim_node, dim_edge, num_nodes, sample_history=1,
-                 memory_dim_out=100, memory_dim_time=100, gnn_dim_out=100,
-                 gnn_dim_time=100, gnn_attn_head=2, dropout=0.1,
-                 combine_node_feature=True, mailbox_size=1,
-                 mail_combine='last', deliver_to_neighbors=False):
+    def __init__(self, dim_node, dim_edge, num_nodes, num_snapshots=1,
+                 dim_embed=100, dim_time=100, num_layers=1, dim_memory=100,
+                 att_head=2, dropout=0.1, att_dropout=0.1,
+                 mailbox_size=10,
+                 deliver_to_neighbors=True, use_memory=True,
+                 memory_device: Union[torch.device, str] = 'cpu',
+                 memory_shared: bool = False,
+                 kvstore_client: Optional[KVStoreClient] = None,
+                 *args, **kwargs):
         super(JODIE, self).__init__()
         self.dim_node = dim_node
         self.dim_node_input = dim_node
         self.dim_edge = dim_edge
 
-        self.sample_history = sample_history
-        self.memory_dim_out = memory_dim_out
-        self.gnn_dim_out = gnn_dim_out
-        self.gnn_dim_out = self.memory_dim_out
-        self.gnn_dim_time = gnn_dim_time
-        self.gnn_attn_head = gnn_attn_head
+        self.dim_time = dim_time
+        self.dim_embed = dim_embed
+        self.num_layers = num_layers
+        self.num_snapshots = num_snapshots
+        self.att_head = att_head
         self.dropout = dropout
-        self.combine_node_feature = combine_node_feature
+        self.att_dropout = att_dropout
+        self.use_memory = use_memory
+
+        self.gnn_layer = num_layers
+        self.dropout = dropout
+        self.attn_dropout = att_dropout
+
+        self.mailbox_size = mailbox_size
 
         # Use Memory
-        self.mailbox = MailBox(memory_dim_out, mailbox_size,
-                               mail_combine, num_nodes, dim_edge,
-                               deliver_to_neighbors)
-        self.mailbox.move_to_gpu()
+        self.memory = Memory(num_nodes, dim_edge, dim_memory,
+                             memory_device, memory_shared, kvstore_client)
 
         # Memory updater
         self.memory_updater = RNNMemeoryUpdater(
-            combine_node_feature, 2 * memory_dim_out + dim_edge,
-            memory_dim_out,
-            memory_dim_time,
-            dim_node)
-        self.dim_node_input = memory_dim_out
+            dim_node, dim_edge, dim_time, dim_embed, dim_memory)
+
+        self.dim_node_input = dim_node
 
         self.layers = torch.nn.ModuleDict()
 
         self.gnn_layer = 1
-        for h in range(sample_history):
+        for h in range(num_snapshots):
             self.layers['l0h' +
                         str(h)] = IdentityNormLayer(self.dim_node_input)
-            self.layers['l0h' + str(h) + 't'] = JODIETimeEmbedding(gnn_dim_out)
+            self.layers['l0h' + str(h) + 't'] = JODIETimeEmbedding(dim_node)
 
-        self.edge_predictor = EdgePredictor(gnn_dim_out)
+        self.edge_predictor = EdgePredictor(dim_embed)
 
     def forward(self, mfgs, neg_samples=1):
         super().forward(mfgs)
         out = list()
         for l in range(self.gnn_layer):
-            for h in range(self.sample_history):
+            for h in range(self.num_snapshots):
                 rst = self.layers['l' + str(l) + 'h' + str(h)](mfgs[l][h])
                 rst = self.layers['l0h' + str(h) + 't'](rst, mfgs[l]
                                                         [h].dstdata['mem_ts'], mfgs[l][h].srcdata['ts'])
@@ -64,7 +72,7 @@ class JODIE(Model):
                 else:
                     out.append(rst)
 
-        if self.sample_history == 1:
+        if self.num_snapshots == 1:
             out = out[0]
         else:
             out = torch.stack(out, dim=0)
@@ -75,13 +83,13 @@ class JODIE(Model):
         self.memory_updater(mfgs[0])
         out = list()
         for l in range(self.gnn_layer):
-            for h in range(self.sample_history):
+            for h in range(self.num_snapshots):
                 rst = self.layers['l' + str(l) + 'h' + str(h)](mfgs[l][h])
                 if l != self.gnn_layer - 1:
                     mfgs[l + 1][h].srcdata['h'] = rst
                 else:
                     out.append(rst)
-        if self.sample_history == 1:
+        if self.num_snapshots == 1:
             out = out[0]
         else:
             out = torch.stack(out, dim=0)
