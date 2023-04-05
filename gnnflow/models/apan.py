@@ -9,14 +9,15 @@ from gnnflow.models.modules.memory_updater import TransformerMemoryUpdater
 
 class APAN(torch.nn.Module):
 
-    def __init__(self, dim_node, dim_edge, num_nodes, num_snapshots=1,
-                 dim_embed=100, dim_time=100, num_layers=1, dim_memory=100,
+    def __init__(self, dim_node, dim_edge, dim_time=100,
+                 dim_embed=100, num_layers=1, num_snapshots=1,
                  att_head=2, dropout=0.1, att_dropout=0.1,
-                 mailbox_size=10,
-                 deliver_to_neighbors=True, use_memory=True,
+                 use_memory=True, dim_memory=100,
+                 num_nodes: Optional[int] = None,
                  memory_device: Union[torch.device, str] = 'cpu',
                  memory_shared: bool = False,
                  kvstore_client: Optional[KVStoreClient] = None,
+                 mailbox_size=10,
                  *args, **kwargs
                  ):
         super(APAN, self).__init__()

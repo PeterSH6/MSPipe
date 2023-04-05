@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.distributed
+import dgl
 from dgl.heterograph import DGLBlock
 from dgl.utils.shared_mem import create_shared_mem_array, get_shared_mem_array
 
@@ -571,3 +572,13 @@ class EarlyStopMonitor:
         self.epoch_count += 1
 
         return self.num_round >= self.max_round
+
+
+def node_to_dgl_blocks(root_nodes, ts):
+    mfgs = list()
+    b = dgl.create_block(
+        ([], []), num_src_nodes=root_nodes.shape[0], num_dst_nodes=root_nodes.shape[0])
+    b.srcdata['ID'] = torch.from_numpy(root_nodes)
+    b.srcdata['ts'] = torch.from_numpy(ts)
+    mfgs.insert(0, [b])
+    return mfgs

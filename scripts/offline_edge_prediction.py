@@ -24,11 +24,13 @@ from gnnflow.data import (DistributedBatchSampler, EdgePredictionDataset,
 from gnnflow.models.dgnn import DGNN
 from gnnflow.models.gat import GAT
 from gnnflow.models.graphsage import SAGE
+from gnnflow.models.apan import APAN
+from gnnflow.models.jodie import JODIE
 from gnnflow.temporal_sampler import TemporalSampler
 from gnnflow.utils import (DstRandEdgeSampler, EarlyStopMonitor, NegLinkSampler,
                            build_dynamic_graph, get_pinned_buffers,
                            get_project_root_dir, load_dataset, load_feat,
-                           mfgs_to_cuda)
+                           mfgs_to_cuda, node_to_dgl_blocks)
 
 datasets = ['REDDIT', 'GDELT', 'LASTFM', 'MAG', 'MOOC', 'WIKI']
 model_names = ['TGN', 'TGAT', 'DySAT', 'GRAPHSAGE', 'GAT']
@@ -108,13 +110,17 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
     with torch.no_grad():
         total_loss = 0
         for target_nodes, ts, eid in dataloader:
-            mfgs = sampler.sample(target_nodes, ts)
-            mfgs_to_cuda(mfgs, device)
+            if type(model).__name__ == 'APAN':
+                mfgs = node_to_dgl_blocks(target_nodes, ts)
+                block = sampler.sample(target_nodes, ts, reverse=True)[0][0]
+            else:
+                mfgs = sampler.sample(target_nodes, ts)
+                block = None
             mfgs = cache.fetch_feature(
                 mfgs, eid)
 
             if args.use_memory:
-                b = mfgs[0][0]  # type: DGLBlock
+                b = mfgs[0][0]
                 if args.distributed:
                     model.module.memory.prepare_input(b)
                     model.module.last_updated = model.module.memory_updater(b)
@@ -130,11 +136,11 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
                 if args.distributed:
                     model.module.memory.update_mem_mail(
                         **model.module.last_updated, edge_feats=cache.target_edge_features,
-                        neg_sample_ratio=1)
+                        neg_sample_ratio=1, block=block)
                 else:
                     model.memory.update_mem_mail(
                         **model.last_updated, edge_feats=cache.target_edge_features,
-                        neg_sample_ratio=1)
+                        neg_sample_ratio=1, block=block)
 
             total_loss += criterion(pred_pos, torch.ones_like(pred_pos))
             total_loss += criterion(pred_neg, torch.zeros_like(pred_neg))
@@ -279,6 +285,12 @@ def main():
     elif args.model == 'GAT':
         model = DGNN(dim_node, dim_edge, **model_config, num_nodes=num_nodes,
                      memory_device=device, memory_shared=args.distributed)
+    elif args.model == 'APAN':
+        model = APAN(dim_node, dim_edge, **model_config, num_nodes=num_nodes,
+                     memory_device=device, memory_shared=args.distributed)
+    elif args.model == 'JODIE':
+        model = JODIE(dim_node, dim_edge, **model_config, num_nodes=num_nodes,
+                      memory_device=device, memory_shared=args.distributed)
     else:
         model = DGNN(dim_node, dim_edge, **model_config, num_nodes=num_nodes,
                      memory_device=device, memory_shared=args.distributed)
@@ -394,7 +406,12 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         for i, (target_nodes, ts, eid) in enumerate(train_loader):
             # Sample
             sample_start_time = time.time()
-            mfgs = sampler.sample(target_nodes, ts)
+            if type(model).__name__ == 'APAN':
+                mfgs = node_to_dgl_blocks(target_nodes, ts)
+                block = sampler.sample(target_nodes, ts, reverse=True)[0][0]
+            else:
+                mfgs = sampler.sample(target_nodes, ts)
+                block = None
             total_sampling_time += time.time() - sample_start_time
 
             # Feature
@@ -405,7 +422,7 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
             total_feature_fetch_time += time.time() - feature_start_time
 
             if args.use_memory:
-                b = mfgs[0][0]  # type: DGLBlock
+                b = mfgs[0][0]
                 if args.distributed:
                     memory_fetch_start_time = time.time()
                     model.module.memory.prepare_input(b)
@@ -443,11 +460,11 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
                     if args.distributed:
                         model.module.memory.update_mem_mail(
                             **model.module.last_updated, edge_feats=cache.target_edge_features,
-                            neg_sample_ratio=1)
+                            neg_sample_ratio=1, block=block)
                     else:
                         model.memory.update_mem_mail(
                             **model.last_updated, edge_feats=cache.target_edge_features,
-                            neg_sample_ratio=1)
+                            neg_sample_ratio=1, block=block)
                     total_memory_write_back_time += time.time() - memory_write_back_start_time
 
             cache_edge_ratio_sum += cache.cache_edge_ratio

@@ -205,7 +205,7 @@ class Memory:
 
     def update_mem_mail(self, last_updated_nid: torch.Tensor,
                         last_updated_memory: torch.Tensor,
-                        last_updated_ts: torch.Tensor,
+                        last_updated_ts: torch.Tensor, block = None,
                         edge_feats: Optional[torch.Tensor] = None,
                         neg_sample_ratio: int = 1):
         """
