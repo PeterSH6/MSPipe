@@ -352,7 +352,7 @@ class DstRandEdgeSampler:
     def __init__(self, dst_list, seed=None):
         self.seed = None
         self.dst_list = np.unique(dst_list)
-        logging.info("dst list: {}".format(self.dst_list))
+
         if seed is not None:
             self.seed = seed
             self.random_state = np.random.RandomState(self.seed)

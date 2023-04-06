@@ -75,7 +75,6 @@ def feature_fetching(cache, device, queue_in, queue_out, stream):
 
 
 def memory_fetching(model, distributed, queue_in, queue_out, stream):
-    logging.info('memory fetching start')
     while True:
         # retrive from queue
         item = queue_in.get()
