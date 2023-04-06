@@ -261,8 +261,7 @@ class Memory:
 
         # TODO: may have difference
         # TODO: current is combine last
-        nid = torch.cat(
-            [src.unsqueeze(1), dst.unsqueeze(1)], dim=1).reshape(-1)
+        nid = block.dstdata['ID']
         mail_ts = last_updated_ts[:len(nid)]
         mail_ts = torch.cat([mail_ts, mail_ts[block.edges()[0].long()]], dim=0)
 
