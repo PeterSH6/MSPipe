@@ -345,17 +345,17 @@ def main():
     best_e = train(train_loader, val_loader, sampler,
                    model, optimizer, criterion, cache, device, test_loader)
 
-    logging.info('Loading model at epoch {}...'.format(best_e))
-    ckpt = torch.load(checkpoint_path)
-    if args.distributed:
-        model.module.load_state_dict(ckpt['model'])
-    else:
-        model.load_state_dict(ckpt['model'])
-    if args.use_memory:
-        if args.distributed:
-            model.module.memory.restore(ckpt['memory'])
-        else:
-            model.memory.restore(ckpt['memory'])
+    # logging.info('Loading model at epoch {}...'.format(best_e))
+    # ckpt = torch.load(checkpoint_path)
+    # if args.distributed:
+    #     model.module.load_state_dict(ckpt['model'])
+    # else:
+    #     model.load_state_dict(ckpt['model'])
+    # if args.use_memory:
+    #     if args.distributed:
+    #         model.module.memory.restore(ckpt['memory'])
+    #     else:
+    #         model.memory.restore(ckpt['memory'])
 
     ap, auc = evaluate(test_loader, sampler, model,
                        criterion, cache, device)
@@ -525,20 +525,21 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         val_ap, val_auc = evaluate(
             val_loader, sampler, model, criterion, cache, device)
 
-        ap, auc = evaluate(test_loader, sampler, model,
-                           criterion, cache, device)
+        # ap, auc = evaluate(test_loader, sampler, model,
+        #                    criterion, cache, device)
+        ap, auc = [0, 0]
 
         if args.distributed:
-            val_res = torch.tensor([val_ap, val_auc]).to(device)
+            val_res = torch.tensor([val_ap, val_auc, ap, auc]).to(device)
             torch.distributed.all_reduce(val_res)
             val_res /= args.world_size
-            val_ap, val_auc = val_res[0].item(), val_res[1].item()
+            val_ap, val_auc, ap, auc = val_res.tolist()
 
         val_end = time.time()
         val_time = val_end - val_start
 
         if args.distributed:
-            metrics = torch.tensor([val_ap, val_auc, cache_edge_ratio_sum,
+            metrics = torch.tensor([val_ap, val_auc, ap, auc, cache_edge_ratio_sum,
                                     cache_node_ratio_sum, total_samples,
                                     total_sampling_time, total_feature_fetch_time,
                                     total_memory_update_time,
@@ -546,7 +547,7 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
                                     total_model_train_time]).to(device)
             torch.distributed.all_reduce(metrics)
             metrics /= args.world_size
-            val_ap, val_auc, cache_edge_ratio_sum, cache_node_ratio_sum, \
+            val_ap, val_auc, ap, auc, cache_edge_ratio_sum, cache_node_ratio_sum, \
                 total_samples, total_sampling_time, total_feature_fetch_time, \
                 total_memory_update_time, total_memory_write_back_time, \
                 total_model_train_time = metrics.tolist()
@@ -555,7 +556,7 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
             logging.info("Epoch {:d}/{:d} | Validation ap {:.4f} | Validation auc {:.4f} | Train time {:.2f} s | Validation time {:.2f} s | Train Throughput {:.2f} samples/s | Cache node ratio {:.4f} | Cache edge ratio {:.4f} | Total Sampling Time {:.2f}s | Total Feature Fetching Time {:.2f}s | Total Memory Fetching Time {:.2f}s | Total Memory Update Time {:.2f}s | Total Memory Write Back Time {:.2f}s | Total Model Train Time {:.2f}s".format(
 
                 e + 1, args.epoch, val_ap, val_auc, epoch_time, val_time, total_samples * args.world_size / epoch_time, cache_node_ratio_sum / (i + 1), cache_edge_ratio_sum / (i + 1), total_sampling_time, total_feature_fetch_time, total_memory_fetch_time, total_memory_update_time, total_memory_write_back_time, total_model_train_time))
-            logging.info('Test ap:{:4f}  test auc:{:4f}'.format(ap, auc))
+            # logging.info('Test ap:{:4f}  test auc:{:4f}'.format(ap, auc))
 
         if args.rank == 0 and val_ap > best_ap:
             best_e = e + 1

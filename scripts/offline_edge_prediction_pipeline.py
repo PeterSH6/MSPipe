@@ -26,18 +26,20 @@ import gnnflow.cache as caches
 from gnnflow.config import get_default_config
 from gnnflow.data import (DistributedBatchSampler, EdgePredictionDataset,
                           RandomStartBatchSampler, default_collate_ndarray)
+from gnnflow.models.apan import APAN
 from gnnflow.models.dgnn import DGNN
 from gnnflow.models.gat import GAT
 from gnnflow.models.graphsage import SAGE
+from gnnflow.models.jodie import JODIE
 from gnnflow.temporal_sampler import TemporalSampler
 from gnnflow.utils import (DstRandEdgeSampler, EarlyStopMonitor,
                            build_dynamic_graph, get_pinned_buffers,
                            get_project_root_dir, load_dataset, load_feat,
-                           mfgs_to_cuda)
+                           mfgs_to_cuda, node_to_dgl_blocks)
 from scripts.pipeline import feature_fetching, gnn_training, memory_fetching, memory_update, sample
 
 datasets = ['REDDIT', 'GDELT', 'LASTFM', 'MAG', 'MOOC', 'WIKI']
-model_names = ['TGN', 'TGAT', 'DySAT', 'GRAPHSAGE', 'GAT']
+model_names = ['TGN', 'TGAT', 'DySAT', 'GRAPHSAGE', 'GAT', 'JODIE', 'APAN']
 cache_names = sorted(name for name in caches.__dict__
                      if not name.startswith("__")
                      and callable(caches.__dict__[name]))
@@ -48,7 +50,7 @@ parser.add_argument("--model", choices=model_names, required=True,
 parser.add_argument("--data", choices=datasets, required=True,
                     help="dataset:" + '|'.join(datasets))
 parser.add_argument("--epoch", help="maximum training epoch",
-                    type=int, default=50)
+                    type=int, default=10)
 parser.add_argument("--lr", help='learning rate', type=float, default=0.0001)
 parser.add_argument("--num-workers", help="num workers for dataloaders",
                     type=int, default=8)
@@ -116,13 +118,25 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
     with torch.no_grad():
         total_loss = 0
         for target_nodes, ts, eid in dataloader:
-            mfgs = sampler.sample(target_nodes, ts)
+            if sampler is not None:
+                model_name = type(model.module).__name__ if args.distributed else type(model).__name__
+                if model_name == 'APAN':
+                    mfgs = node_to_dgl_blocks(target_nodes, ts)
+                    target_pos = len(target_nodes) * 2 // 3
+                    block = sampler.sample(
+                        target_nodes[:target_pos], ts[:target_pos], reverse=True)[0][0]
+                else:
+                    mfgs = sampler.sample(target_nodes, ts)
+                    block = None
+            else:
+                mfgs = node_to_dgl_blocks(target_nodes, ts)
+                block = None
             mfgs_to_cuda(mfgs, device)
             mfgs = cache.fetch_feature(
                 mfgs, eid)
 
             if args.use_memory:
-                b = mfgs[0][0]  # type: DGLBlock
+                b = mfgs[0][0]
                 if args.distributed:
                     model.module.memory.prepare_input(b)
                     model.module.last_updated = model.module.memory_updater(b)
@@ -138,11 +152,11 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
                 if args.distributed:
                     model.module.memory.update_mem_mail(
                         **model.module.last_updated, edge_feats=cache.target_edge_features.get(),
-                        neg_sample_ratio=1)
+                        neg_sample_ratio=1, block=block)
                 else:
                     model.memory.update_mem_mail(
                         **model.last_updated, edge_feats=cache.target_edge_features.get(),
-                        neg_sample_ratio=1)
+                        neg_sample_ratio=1, block=block)
 
             total_loss += criterion(pred_pos, torch.ones_like(pred_pos))
             total_loss += criterion(pred_neg, torch.zeros_like(pred_neg))
@@ -184,23 +198,41 @@ def main():
         data_config["mem_resource_type"] = "shared"
 
     train_data, val_data, test_data, full_data = load_dataset(args.data)
+    train_num_nodes = len(np.unique(np.concatenate(
+        (train_data['src'], train_data['dst']))))
+    full_num_nodes = len(np.unique(np.concatenate(
+        (full_data['src'], full_data['dst']))))
+    logging.info("train_num_nodes: {} full_num_nodes: {}".format(
+        train_num_nodes, full_num_nodes))
+    # train_rand_sampler = NegLinkSampler(train_num_nodes)
+    # val_rand_sampler = NegLinkSampler(full_num_nodes)
+    # test_rand_sampler = NegLinkSampler(full_num_nodes)
+    # train_rand_sampler = DstRandEdgeSampler(
+    #     train_data['dst'].to_numpy(dtype=np.int32))
+    # val_rand_sampler = DstRandEdgeSampler(
+    #     full_data['dst'].to_numpy(dtype=np.int32))
+    # test_rand_sampler = DstRandEdgeSampler(
+    #     full_data['dst'].to_numpy(dtype=np.int32))
     train_rand_sampler = DstRandEdgeSampler(
-        train_data['dst'].to_numpy(dtype=np.int32))
+        np.concatenate((train_data['src'].to_numpy(dtype=np.int32),
+                        train_data['dst'].to_numpy(dtype=np.int32))))
     val_rand_sampler = DstRandEdgeSampler(
-        full_data['dst'].to_numpy(dtype=np.int32))
+        np.concatenate((full_data['src'].to_numpy(dtype=np.int32),
+                        full_data['dst'].to_numpy(dtype=np.int32))))
     test_rand_sampler = DstRandEdgeSampler(
-        full_data['dst'].to_numpy(dtype=np.int32))
+        np.concatenate((full_data['src'].to_numpy(dtype=np.int32),
+                        full_data['dst'].to_numpy(dtype=np.int32))))
 
     train_ds = EdgePredictionDataset(train_data, train_rand_sampler)
     val_ds = EdgePredictionDataset(val_data, val_rand_sampler)
     test_ds = EdgePredictionDataset(test_data, test_rand_sampler)
 
     batch_size = model_config['batch_size']
-    num_target_nodes = batch_size * 3
-    logging.info("num target nodes: {}".format(num_target_nodes))
     # NB: learning rate is scaled by the number of workers
     args.lr = args.lr * math.sqrt(args.world_size)
     logging.info("batch size: {}, lr: {}".format(batch_size, args.lr))
+    test_batch_size = batch_size // args.world_size
+    logging.info("test batch size: {}".format(test_batch_size))
 
     if args.distributed:
         train_sampler = DistributedBatchSampler(
@@ -213,7 +245,7 @@ def main():
             world_size=args.world_size)
         test_sampler = DistributedBatchSampler(
             SequentialSampler(test_ds),
-            batch_size=batch_size, drop_last=False, rank=args.rank,
+            batch_size=test_batch_size, drop_last=False, rank=args.rank,
             world_size=args.world_size)
     else:
         train_sampler = RandomStartBatchSampler(
@@ -269,20 +301,31 @@ def main():
     elif args.model == 'GAT':
         model = DGNN(dim_node, dim_edge, **model_config, num_nodes=num_nodes,
                      memory_device=device, memory_shared=args.distributed)
+    elif args.model == 'APAN':
+        model = APAN(dim_node, dim_edge, **model_config, num_nodes=num_nodes,
+                     memory_device=device, memory_shared=args.distributed)
+    elif args.model == 'JODIE':
+        model = JODIE(dim_node, dim_edge, **model_config, num_nodes=num_nodes,
+                      memory_device=device, memory_shared=args.distributed)
     else:
         model = DGNN(dim_node, dim_edge, **model_config, num_nodes=num_nodes,
                      memory_device=device, memory_shared=args.distributed)
     model.to(device)
 
-    sampler = TemporalSampler(dgraph, **model_config)
+    if type(model).__name__ == 'JODIE':
+        sampler = None
+    else:
+        sampler = TemporalSampler(dgraph, **model_config)
 
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.local_rank], find_unused_parameters=True)
 
-    pinned_nfeat_buffs, pinned_efeat_buffs = get_pinned_buffers(
-        model_config['fanouts'], model_config['num_snapshots'], batch_size,
-        dim_node, dim_edge)
+    pinned_nfeat_buffs = None
+    pinned_efeat_buffs = None
+    # pinned_nfeat_buffs, pinned_efeat_buffs = get_pinned_buffers(
+    #     model_config['fanouts'], model_config['num_snapshots'], batch_size,
+    #     dim_node, dim_edge)
 
     # Cache
     cache = caches.__dict__[args.cache](args.edge_cache_ratio, args.node_cache_ratio,
@@ -308,19 +351,19 @@ def main():
     criterion = torch.nn.BCEWithLogitsLoss()
 
     best_e = train(train_loader, val_loader, sampler,
-                   model, optimizer, criterion, cache, device, num_target_nodes)
+                   model, optimizer, criterion, cache, device, test_loader)
 
-    logging.info('Loading model at epoch {}...'.format(best_e))
-    ckpt = torch.load(checkpoint_path)
-    if args.distributed:
-        model.module.load_state_dict(ckpt['model'])
-    else:
-        model.load_state_dict(ckpt['model'])
-    if args.use_memory:
-        if args.distributed:
-            model.module.memory.restore(ckpt['memory'])
-        else:
-            model.memory.restore(ckpt['memory'])
+    # logging.info('Loading model at epoch {}...'.format(best_e))
+    # ckpt = torch.load(checkpoint_path)
+    # if args.distributed:
+    #     model.module.load_state_dict(ckpt['model'])
+    # else:
+    #     model.load_state_dict(ckpt['model'])
+    # if args.use_memory:
+    #     if args.distributed:
+    #         model.module.memory.restore(ckpt['memory'])
+    #     else:
+    #         model.memory.restore(ckpt['memory'])
 
     ap, auc = evaluate(test_loader, sampler, model,
                        criterion, cache, device)
@@ -331,6 +374,8 @@ def main():
         ap, auc = metrics.tolist()
         if args.rank == 0:
             logging.info('Test ap:{:4f}  test auc:{:4f}'.format(ap, auc))
+    else:
+        logging.info('Test ap:{:4f}  test auc:{:4f}'.format(ap, auc))
 
     if args.distributed:
         torch.distributed.barrier()
@@ -340,7 +385,7 @@ sampling_time_sum = 0
 
 
 def train(train_loader, val_loader, sampler, model, optimizer, criterion,
-          cache, device, num_target_nodes):
+          cache, device, test_loader):
     global training
     best_ap = 0
     best_e = 0
@@ -407,13 +452,13 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         #     model, args.distributed, cache, gnn_update_queue), name='update')
 
         sampler_thread = Thread(target=sample, args=(
-            train_loader, sampler, sample_feature_queue), name='Sample')
+            model, args.distributed, train_loader, sampler, sample_feature_queue), name='Sample')
         feature_thread = Thread(target=feature_fetching, args=(
             cache, device, sample_feature_queue, feature_memory_queue, feat_stream), name='Feature')
         memory_thread = Thread(target=memory_fetching, args=(
             model, args.distributed, feature_memory_queue, memory_gnn_queue, mem_stream), name='Memory')
         gnn_thread = Thread(target=gnn_training, args=(
-            model, optimizer, criterion, num_target_nodes, memory_gnn_queue, gnn_update_queue, gnn_stream), name='gnn')
+            model, optimizer, criterion, memory_gnn_queue, gnn_update_queue, gnn_stream), name='gnn')
         memory_update_thread = Thread(target=memory_update, args=(
             model, args.distributed, cache, gnn_update_queue, update_stream), name='update')
 
@@ -438,17 +483,22 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         val_ap, val_auc = evaluate(
             val_loader, sampler, model, criterion, cache, device)
 
+        # ap, auc = evaluate(test_loader, sampler, model,
+        #                    criterion, cache, device)
+
+        ap, auc = [0, 0]
+
         if args.distributed:
-            val_res = torch.tensor([val_ap, val_auc]).to(device)
+            val_res = torch.tensor([val_ap, val_auc, ap, auc]).to(device)
             torch.distributed.all_reduce(val_res)
             val_res /= args.world_size
-            val_ap, val_auc = val_res[0].item(), val_res[1].item()
+            val_ap, val_auc, ap, auc = val_res.tolist()
 
         val_end = time.time()
         val_time = val_end - val_start
 
         if args.distributed:
-            metrics = torch.tensor([val_ap, val_auc, cache_edge_ratio_sum,
+            metrics = torch.tensor([val_ap, val_auc, ap, auc, cache_edge_ratio_sum,
                                     cache_node_ratio_sum, total_samples,
                                     total_sampling_time, total_feature_fetch_time,
                                     total_memory_update_time,
@@ -456,10 +506,11 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
                                     total_model_train_time]).to(device)
             torch.distributed.all_reduce(metrics)
             metrics /= args.world_size
-            val_ap, val_auc, cache_edge_ratio_sum, cache_node_ratio_sum, \
+            val_ap, val_auc, ap, auc, cache_edge_ratio_sum, cache_node_ratio_sum, \
                 total_samples, total_sampling_time, total_feature_fetch_time, \
                 total_memory_update_time, total_memory_write_back_time, \
                 total_model_train_time = metrics.tolist()
+
 
         if args.rank == 0:
             global sampling_time_sum
@@ -471,6 +522,7 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
             model_train_sum += total_model_train_time
             logging.info("Epoch {:d}/{:d} | Validation ap {:.4f} | Validation auc {:.4f} | Train time {:.2f} s | Validation time {:.2f} s | Train Throughput {:.2f} samples/s |".format(
                 e + 1, args.epoch, val_ap, val_auc, epoch_time, val_time, total_samples * args.world_size / epoch_time))
+            # logging.info('Test ap:{:4f}  test auc:{:4f}'.format(ap, auc))
             # logging.info("Epoch {:d}/{:d} | Validation ap {:.4f} | Validation auc {:.4f} | Train time {:.2f} s | Validation time {:.2f} s | Train Throughput {:.2f} samples/s | Cache node ratio {:.4f} | Cache edge ratio {:.4f} | Total Sampling Time {:.2f}s | Total Feature Fetching Time {:.2f}s | Total Memory Fetching Time {:.2f}s | Total Memory Update Time {:.2f}s | Total Memory Write Back Time {:.2f}s | Total Model Train Time {:.2f}s".format(
 
             #     e + 1, args.epoch, val_ap, val_auc, epoch_time, val_time, total_samples * args.world_size / epoch_time, cache_node_ratio_sum / (i + 1), cache_edge_ratio_sum / (i + 1), total_sampling_time, total_feature_fetch_time, total_memory_fetch_time, total_memory_update_time, total_memory_write_back_time, total_model_train_time))
