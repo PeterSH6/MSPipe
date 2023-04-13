@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.5.1)
+project(tgl_gc)
+add_subdirectory(third_party/pybind11)
+pybind11_add_module(gen_graph_multithread gen_graph_multithread.cc)
+SET( CMAKE_CXX_FLAGS "-mcmodel=large -std=c++11 -O3 -lpthread")
