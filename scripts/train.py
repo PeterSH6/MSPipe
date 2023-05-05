@@ -2,11 +2,14 @@
 import logging
 from queue import Queue
 from threading import Lock
+from time import sleep
 from typing import List
 import torch
 
 from gnnflow.utils import mfgs_to_cuda, node_to_dgl_blocks
 
+# global iter_mem_update
+iter_mem_update = 0
 
 def training_batch(model, sampler, cache, target_nodes, ts, eid, device, distributed, optimizer, criterion, Stream: torch.cuda.Stream, queue: Queue, lock_pool: List[Lock], i: int, rank: int):
     with torch.cuda.stream(Stream):
@@ -31,10 +34,16 @@ def training_batch(model, sampler, cache, target_nodes, ts, eid, device, distrib
                 mfgs, eid, target_edge_features=True)  # because all use memory
         with lock_pool[2]:
             b = mfgs[0][0]  # type: DGLBlock
+            global iter_mem_update
+            # while i - iter_mem_update > 5:
+            #     sleep(0.0001)
             if distributed:
                 model.module.memory.prepare_input(b)
             else:
                 model.memory.prepare_input(b)
+            # global iter_mem_update
+            # if rank == 0:
+            #     logging.info('iter {} staleness {}'.format(i, i - iter_mem_update))
         with lock_pool[3]:
             # if rank == 0:
             #     logging.info("gnn iter: {}".format(i))
@@ -71,4 +80,10 @@ def training_batch(model, sampler, cache, target_nodes, ts, eid, device, distrib
                     model.memory.update_mem_mail(
                         **last_updated, edge_feats=cache.target_edge_features.get(),
                         neg_sample_ratio=1, block=block)
+                
+                # global iter_mem_update
+                iter_mem_update = i
+                # if rank == 0:
+                #     logging.info('current iteration: {}'.format(i))
+                #     logging.info('current update: {}'.format(iter_mem_update))
     # queue.get(1)

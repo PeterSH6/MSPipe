@@ -9,7 +9,7 @@ import os
 import torch
 from dgl.heterograph import DGLBlock
 
-from gnnflow.models.modules.layers import TimeEncode
+from gnnflow.models.modules.layers import FixTimeEncode, TimeEncode
 
 
 class GRUMemeoryUpdater(torch.nn.Module):
@@ -38,6 +38,7 @@ class GRUMemeoryUpdater(torch.nn.Module):
         self.use_time_enc = dim_time > 0
         if self.use_time_enc:
             self.time_enc = TimeEncode(dim_time)
+            # self.time_enc = FixTimeEncode(dim_time)
 
         if dim_node > 0 and dim_node != dim_memory:
             self.node_feat_proj = torch.nn.Linear(dim_node, dim_memory)
@@ -66,6 +67,7 @@ class GRUMemeoryUpdater(torch.nn.Module):
             b.srcdata['mem_input'] = torch.cat(
                 [b.srcdata['mem_input'], time_feat], dim=1)
 
+        # TODO: A fake mail
         updated_memory = self.updater(
             b.srcdata['mem_input'], b.srcdata['mem'])
 

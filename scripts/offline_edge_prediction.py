@@ -27,7 +27,7 @@ from gnnflow.models.graphsage import SAGE
 from gnnflow.models.apan import APAN
 from gnnflow.models.jodie import JODIE
 from gnnflow.temporal_sampler import TemporalSampler
-from gnnflow.utils import (DstRandEdgeSampler, EarlyStopMonitor, NegLinkSampler,
+from gnnflow.utils import (DstRandEdgeSampler, EarlyStopMonitor, NegLinkSampler, allocate_pinned_memory_buffers,
                            build_dynamic_graph, get_pinned_buffers,
                            get_project_root_dir, load_dataset, load_feat,
                            mfgs_to_cuda, node_to_dgl_blocks)
@@ -100,8 +100,30 @@ def gpu_load():
         logging.info("GPU load: {:.2f}%".format(avg_load * 100))
         time.sleep(1)
 
+def neg_sample(target_nodes, ts, nodes):
+    batch_size = len(target_nodes) // 3
+    target_pos = len(target_nodes) * 2 // 3
+    num_nodes = len(nodes)
+    target_nodes_pos = target_nodes[:target_pos]
+    ts_pos = ts[:batch_size]
+    dst = target_nodes[target_pos:2 * target_pos]
+    neg_sample = None
+    for i in range(batch_size):
+        temp = np.delete(nodes, np.where(nodes == dst[i]))
+        temp = np.reshape(temp, (len(temp), 1))
+        if neg_sample is None:
+            neg_sample = temp
+        else:
+            neg_sample = np.hstack([neg_sample, temp])
+    num_neg = neg_sample.shape[0]
+    neg_sample = neg_sample.flatten('C')
+    target_nodes = np.concatenate([target_nodes_pos, neg_sample])
+    ts = np.tile(ts_pos, num_neg + 2)
+    return target_nodes, ts, num_neg
+    
 
-def evaluate(dataloader, sampler, model, criterion, cache, device):
+
+def evaluate(dataloader, sampler, model, criterion, cache, device, nodes=None, num_neg=1):
     model.eval()
     val_losses = list()
     aps = list()
@@ -110,6 +132,10 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
     with torch.no_grad():
         total_loss = 0
         for target_nodes, ts, eid in dataloader:
+            # if nodes is not None:
+            #     target_nodes, ts, num_neg = neg_sample(target_nodes, ts, nodes)
+            # logging.info('target_nodes: {}'.format(target_nodes.shape))
+            # logging.info('target_nodes: {}'.format(ts.shape))
             if sampler is not None:
                 model_name = type(model.module).__name__ if args.distributed else type(model).__name__
                 if model_name == 'APAN':
@@ -123,6 +149,7 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
             else:
                 mfgs = node_to_dgl_blocks(target_nodes, ts)
                 block = None
+
             mfgs_to_cuda(mfgs, device)
             mfgs = cache.fetch_feature(
                 mfgs, eid)
@@ -136,7 +163,7 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
                     model.memory.prepare_input(b)
                     model.last_updated = model.memory_updater(b)
 
-            pred_pos, pred_neg = model(mfgs)
+            pred_pos, pred_neg = model(mfgs, neg_samples=num_neg)
 
             if args.use_memory:
                 # NB: no need to do backward here
@@ -144,11 +171,11 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
                 if args.distributed:
                     model.module.memory.update_mem_mail(
                         **model.module.last_updated, edge_feats=cache.target_edge_features,
-                        neg_sample_ratio=1, block=block)
+                        neg_sample_ratio=num_neg, block=block)
                 else:
                     model.memory.update_mem_mail(
                         **model.last_updated, edge_feats=cache.target_edge_features,
-                        neg_sample_ratio=1, block=block)
+                        neg_sample_ratio=num_neg, block=block)
 
             total_loss += criterion(pred_pos, torch.ones_like(pred_pos))
             total_loss += criterion(pred_neg, torch.zeros_like(pred_neg))
@@ -156,13 +183,19 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
             y_true = torch.cat(
                 [torch.ones(pred_pos.size(0)),
                  torch.zeros(pred_neg.size(0))], dim=0)
-            aucs_mrrs.append(roc_auc_score(y_true, y_pred))
+            if num_neg > 1:
+                aucs_mrrs.append(torch.reciprocal(torch.sum(pred_pos.squeeze() < pred_neg.squeeze().reshape(num_neg, -1), dim=0) + 1).type(torch.float))
+            else:
+                aucs_mrrs.append(roc_auc_score(y_true, y_pred))
             aps.append(average_precision_score(y_true, y_pred))
 
         val_losses.append(float(total_loss))
 
     ap = float(torch.tensor(aps).mean())
-    auc_mrr = float(torch.tensor(aucs_mrrs).mean())
+    if num_neg > 1:
+        auc_mrr = float(torch.cat(aucs_mrrs).mean())
+    else:
+        auc_mrr = float(torch.tensor(aucs_mrrs).mean())
     return ap, auc_mrr
 
 
@@ -172,7 +205,7 @@ def main():
         args.local_rank = int(os.environ['LOCAL_RANK'])
         args.local_world_size = int(os.environ['LOCAL_WORLD_SIZE'])
         torch.cuda.set_device(args.local_rank)
-        torch.distributed.init_process_group('nccl')
+        torch.distributed.init_process_group('gloo')
         args.rank = torch.distributed.get_rank()
         args.world_size = torch.distributed.get_world_size()
     else:
@@ -223,6 +256,7 @@ def main():
     # NB: learning rate is scaled by the number of workers
     args.lr = args.lr * math.sqrt(args.world_size)
     logging.info("batch size: {}, lr: {}".format(batch_size, args.lr))
+    # test_batch_size = batch_size // (args.world_size * 10)
     test_batch_size = batch_size // args.world_size
     logging.info("test batch size: {}".format(test_batch_size))
 
@@ -328,6 +362,18 @@ def main():
                                         pinned_efeat_buffs,
                                         None,
                                         False)
+    
+    # # set pinned for memory
+    # pinned_node_memory_buffs, pinned_node_memory_ts_buffs, \
+    # pinned_mailbox_buffs, pinned_mailbox_ts_buffs = allocate_pinned_memory_buffers(
+    #     model_config['fanouts'],
+    #     model_config['num_snapshots'],
+    #     batch_size, model_config['dim_memory'],
+    #     2 * model_config['dim_memory'] + dim_edge)
+    # if args.distributed:
+    #     model.module.memory.set_pinned(pinned_node_memory_buffs, pinned_node_memory_ts_buffs, pinned_mailbox_buffs, pinned_mailbox_ts_buffs)
+    # else:
+    #     model.memory.set_pinned(pinned_node_memory_buffs, pinned_node_memory_ts_buffs, pinned_mailbox_buffs, pinned_mailbox_ts_buffs)
 
     # only gnnlab static need to pass param
     if args.cache == 'GNNLabStaticCache':
@@ -345,17 +391,21 @@ def main():
     best_e = train(train_loader, val_loader, sampler,
                    model, optimizer, criterion, cache, device, test_loader)
 
-    # logging.info('Loading model at epoch {}...'.format(best_e))
-    # ckpt = torch.load(checkpoint_path)
-    # if args.distributed:
-    #     model.module.load_state_dict(ckpt['model'])
-    # else:
-    #     model.load_state_dict(ckpt['model'])
-    # if args.use_memory:
-    #     if args.distributed:
-    #         model.module.memory.restore(ckpt['memory'])
-    #     else:
-    #         model.memory.restore(ckpt['memory'])
+    logging.info('Loading model at epoch {}...'.format(best_e))
+    ckpt = torch.load(checkpoint_path)
+    if args.distributed:
+        model.module.load_state_dict(ckpt['model'])
+    else:
+        model.load_state_dict(ckpt['model'])
+    if args.use_memory:
+        if args.distributed:
+            model.module.memory.restore(ckpt['memory'])
+        else:
+            model.memory.restore(ckpt['memory'])
+
+    # add evaluation nodes
+    all_nodes = dgraph.nodes()
+
 
     ap, auc = evaluate(test_loader, sampler, model,
                        criterion, cache, device)
@@ -387,9 +437,9 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
     model_train_time_sum = 0
     early_stopper = EarlyStopMonitor()
 
-    if args.local_rank == 0:
-        gpu_load_thread = threading.Thread(target=gpu_load)
-        gpu_load_thread.start()
+    # if args.local_rank == 0:
+    #     gpu_load_thread = threading.Thread(target=gpu_load)
+    #     gpu_load_thread.start()
 
     logging.info('Start training...')
     for e in range(args.epoch):
@@ -431,10 +481,9 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
                 mfgs = node_to_dgl_blocks(target_nodes, ts)
                 block = None
             total_sampling_time += time.time() - sample_start_time
-
+            feature_start_time = time.time()
             # Feature
             mfgs_to_cuda(mfgs, device)
-            feature_start_time = time.time()
             mfgs = cache.fetch_feature(
                 mfgs, eid)
             total_feature_fetch_time += time.time() - feature_start_time
@@ -525,9 +574,9 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         val_ap, val_auc = evaluate(
             val_loader, sampler, model, criterion, cache, device)
 
-        # ap, auc = evaluate(test_loader, sampler, model,
-        #                    criterion, cache, device)
-        ap, auc = [0, 0]
+        ap, auc = evaluate(test_loader, sampler, model,
+                           criterion, cache, device)
+        # ap, auc = [0, 0]
 
         if args.distributed:
             val_res = torch.tensor([val_ap, val_auc, ap, auc]).to(device)
@@ -556,7 +605,7 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
             logging.info("Epoch {:d}/{:d} | Validation ap {:.4f} | Validation auc {:.4f} | Train time {:.2f} s | Validation time {:.2f} s | Train Throughput {:.2f} samples/s | Cache node ratio {:.4f} | Cache edge ratio {:.4f} | Total Sampling Time {:.2f}s | Total Feature Fetching Time {:.2f}s | Total Memory Fetching Time {:.2f}s | Total Memory Update Time {:.2f}s | Total Memory Write Back Time {:.2f}s | Total Model Train Time {:.2f}s".format(
 
                 e + 1, args.epoch, val_ap, val_auc, epoch_time, val_time, total_samples * args.world_size / epoch_time, cache_node_ratio_sum / (i + 1), cache_edge_ratio_sum / (i + 1), total_sampling_time, total_feature_fetch_time, total_memory_fetch_time, total_memory_update_time, total_memory_write_back_time, total_model_train_time))
-            # logging.info('Test ap:{:4f}  test auc:{:4f}'.format(ap, auc))
+            logging.info('Test ap:{:4f}  test auc:{:4f}'.format(ap, auc))
 
         if args.rank == 0 and val_ap > best_ap:
             best_e = e + 1
@@ -596,7 +645,7 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
 
     if args.local_rank == 0:
         training = False
-        gpu_load_thread.join()
+        # gpu_load_thread.join()
 
     return best_e
 

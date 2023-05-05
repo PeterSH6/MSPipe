@@ -28,7 +28,7 @@ class ResourceHolder<cudaStream_t> {
   ResourceHolder() {
     CUDA_CALL(cudaStreamCreate(&resource_));
     CUDA_CALL(
-        cudaStreamCreateWithPriority(&resource_, cudaStreamNonBlocking, -1))
+        cudaStreamCreateWithPriority(&resource_, cudaStreamNonBlocking, 0))
   }
 
   ~ResourceHolder() { cudaStreamDestroy(resource_); }

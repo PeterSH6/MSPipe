@@ -116,7 +116,7 @@ class DGNN(torch.nn.Module):
         if self.use_memory:
             self.memory.restore(backup)
 
-    def forward(self, mfgs: List[List[DGLBlock]], return_embed: bool =False):
+    def forward(self, mfgs: List[List[DGLBlock]], return_embed: bool =False, neg_samples: int =1):
         """
         Args:
             mfgs: list of list of DGLBlocks
@@ -140,4 +140,4 @@ class DGNN(torch.nn.Module):
 
         if return_embed:
             return embed
-        return self.edge_predictor(embed)
+        return self.edge_predictor(embed, neg_samples)

@@ -330,6 +330,7 @@ class ParallelSampler {
 
   void sample(std::vector<NodeIDType>& root_nodes,
               std::vector<TimeStampType>& root_ts) {
+    py::gil_scoped_release release;  // release GIL
     // a weird bug, dgl library seems to modify the total number of threads
     omp_set_num_threads(num_threads);
     ret.resize(0);
@@ -347,6 +348,7 @@ class ParallelSampler {
       else
         sample_layer(root_nodes, root_ts, num_neighbors[i], false, false);
     }
+    py::gil_scoped_acquire acquire;  // Recover GIL
   }
 };
 

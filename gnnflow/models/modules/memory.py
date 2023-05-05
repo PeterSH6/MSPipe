@@ -26,7 +26,11 @@ class Memory:
     def __init__(self, num_nodes: int, dim_edge: int, dim_memory: int,
                  device: Union[torch.device, str] = 'cpu',
                  shared_memory: bool = False,
-                 kvstore_client: Optional[KVStoreClient] = None):
+                 kvstore_client: Optional[KVStoreClient] = None,
+                 pinned_memory_buffs: Optional[torch.Tensor] = None, 
+                 pinned_node_memory_ts_buffs: Optional[torch.Tensor] = None, 
+                 pinned_mailbox_buffs: Optional[torch.Tensor] = None,
+                 pinned_mailbox_ts_buffs: Optional[torch.Tensor] = None):
         """
         Args:
             num_nodes: number of nodes in the graph
@@ -50,6 +54,11 @@ class Memory:
         self.kvstore_client = kvstore_client
         self.partition = self.kvstore_client != None
         self.distributed = shared_memory
+
+        self.pinned_memory_buffs = pinned_memory_buffs
+        self.pinned_node_memory_ts_buffs = pinned_node_memory_ts_buffs
+        self.pinned_mailbox_buffs = pinned_mailbox_buffs
+        self.pinned_mailbox_ts_buffs = pinned_mailbox_ts_buffs
 
         self.lock = Lock()
         self.i = 0
@@ -137,6 +146,15 @@ class Memory:
 
         self.num_nodes = num_nodes
 
+    def set_pinned(self, pinned_memory_buffs, 
+                    pinned_node_memory_ts_buffs, 
+                    pinned_mailbox_buffs, 
+                    pinned_mailbox_ts_buffs):
+        self.pinned_memory_buffs = pinned_memory_buffs
+        self.pinned_node_memory_ts_buffs = pinned_node_memory_ts_buffs
+        self.pinned_mailbox_buffs = pinned_mailbox_buffs
+        self.pinned_mailbox_ts_buffs = pinned_mailbox_ts_buffs
+
     def backup(self) -> Dict:
         """
         Backup the current memory and mailbox.
@@ -187,10 +205,26 @@ class Memory:
             mail = pulled_memory[2].to(device)
             mail_ts = pulled_memory[3].to(device)
         else:
-            mem = self.node_memory[all_nodes_unique].to(device)
-            mem_ts = self.node_memory_ts[all_nodes_unique].to(device)
-            mail = self.mailbox[all_nodes_unique].to(device)
-            mail_ts = self.mailbox_ts[all_nodes_unique].to(device)
+            if self.pinned_memory_buffs is not None:
+                torch.index_select(self.node_memory, 0, all_nodes_unique,
+                                   out=self.pinned_memory_buffs[0][:all_nodes_unique.shape[0]])
+                mem = self.pinned_memory_buffs[0][:all_nodes_unique.shape[0]].to(device, non_blocking=True)
+
+                torch.index_select(self.node_memory_ts, 0, all_nodes_unique,
+                                   out=self.pinned_node_memory_ts_buffs[0][:all_nodes_unique.shape[0]])
+                mem_ts = self.pinned_node_memory_ts_buffs[0][:all_nodes_unique.shape[0]].to(device, non_blocking=True)
+
+                torch.index_select(self.mailbox, 0, all_nodes_unique,
+                                   out=self.pinned_mailbox_buffs[0][:all_nodes_unique.shape[0]])
+                mail = self.pinned_mailbox_buffs[0][:all_nodes_unique.shape[0]].to(device, non_blocking=True)
+                torch.index_select(self.mailbox_ts, 0, all_nodes_unique,
+                                   out=self.pinned_mailbox_ts_buffs[0][:all_nodes_unique.shape[0]])
+                mail_ts = self.pinned_mailbox_ts_buffs[0][:all_nodes_unique.shape[0]].to(device, non_blocking=True)
+            else:
+                mem = self.node_memory[all_nodes_unique].to(device)
+                mem_ts = self.node_memory_ts[all_nodes_unique].to(device)
+                mail = self.mailbox[all_nodes_unique].to(device)
+                mail_ts = self.mailbox_ts[all_nodes_unique].to(device)
 
         b.srcdata['mem'] = mem[inv]
         b.srcdata['mem_ts'] = mem_ts[inv]
@@ -271,28 +305,28 @@ class Memory:
 
         # find the global recent
         # Use all_gather to gather the tensors from all the processes
-        if self.distributed:
-            nid_mails = self.sync(nid_mail)
-            mails = self.sync(mail)
-            mail_tss = self.sync(mail_ts)
-            uni, inv = torch.unique(nid_mails, return_inverse=True)
-            perm = torch.arange(
-                inv.size(0), dtype=inv.dtype, device=inv.device)
-            perm = inv.new_empty(uni.size(0)).scatter_(0, inv, perm)
-            nid_mail = nid_mails[perm]
-            mail = mails[perm]
-            mail_ts = mail_tss[perm]
+        # if self.distributed:
+        #     nid_mails = self.sync(nid_mail)
+        #     mails = self.sync(mail)
+        #     mail_tss = self.sync(mail_ts)
+        #     uni, inv = torch.unique(nid_mails, return_inverse=True)
+        #     perm = torch.arange(
+        #         inv.size(0), dtype=inv.dtype, device=inv.device)
+        #     perm = inv.new_empty(uni.size(0)).scatter_(0, inv, perm)
+        #     nid_mail = nid_mails[perm]
+        #     mail = mails[perm]
+        #     mail_ts = mail_tss[perm]
 
-            nids = self.sync(nid)
-            mems = self.sync(mem)
-            mem_tss = self.sync(mem_ts)
-            uni, inv = torch.unique(nids, return_inverse=True)
-            perm = torch.arange(
-                inv.size(0), dtype=inv.dtype, device=inv.device)
-            perm = inv.new_empty(uni.size(0)).scatter_(0, inv, perm)
-            nid = nids[perm]
-            mem = mems[perm]
-            mem_ts = mem_tss[perm]
+        #     nids = self.sync(nid)
+        #     mems = self.sync(mem)
+        #     mem_tss = self.sync(mem_ts)
+        #     uni, inv = torch.unique(nids, return_inverse=True)
+        #     perm = torch.arange(
+        #         inv.size(0), dtype=inv.dtype, device=inv.device)
+        #     perm = inv.new_empty(uni.size(0)).scatter_(0, inv, perm)
+        #     nid = nids[perm]
+        #     mem = mems[perm]
+        #     mem_ts = mem_tss[perm]
 
         if self.partition:
             # cat the memory first

@@ -12,7 +12,7 @@ if [[ $NPROC_PER_NODE -gt 1 ]]; then
     cmd="torchrun \
         --nnodes=1 --nproc_per_node=$NPROC_PER_NODE \
         --standalone \
-        offline_tgl.py --model $MODEL --data $DATA \
+        offline_tgl_presample.py --model $MODEL --data $DATA \
         --cache $CACHE --edge-cache-ratio $EDGE_CACHE_RATIO \
         --node-cache-ratio $NODE_CACHE_RATIO --snapshot-time-window $TIME_WINDOW \
         --ingestion-batch-size 10000000"
@@ -24,4 +24,4 @@ else
 fi
 
 echo $cmd
-OMP_NUM_THREADS=8 exec $cmd > TGL_${MODEL}_${DATA}_${CACHE}_${EDGE_CACHE_RATIO}_${NODE_CACHE_RATIO}_${TIME_WINDOW}_baseline_600.log 2>&1
+OMP_NUM_THREADS=8 exec $cmd > TGL_${MODEL}_${DATA}_${CACHE}_${EDGE_CACHE_RATIO}_${NODE_CACHE_RATIO}_${TIME_WINDOW}_presample_4000_nosync_pin.log 2>&1

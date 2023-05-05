@@ -106,7 +106,7 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
     val_losses = list()
     aps = list()
     aucs_mrrs = list()
-
+    i = 0
     with torch.no_grad():
         total_loss = 0
         for target_nodes, ts, eid in dataloader:
@@ -143,11 +143,11 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
                 # use one function
                 if args.distributed:
                     model.module.memory.update_mem_mail(
-                        **model.module.last_updated, edge_feats=cache.target_edge_features,
+                        **model.module.last_updated, edge_feats=cache.target_edge_features.get(),
                         neg_sample_ratio=1, block=block)
                 else:
                     model.memory.update_mem_mail(
-                        **model.last_updated, edge_feats=cache.target_edge_features,
+                        **model.last_updated, edge_feats=cache.target_edge_features.get(),
                         neg_sample_ratio=1, block=block)
 
             total_loss += criterion(pred_pos, torch.ones_like(pred_pos))
@@ -329,6 +329,18 @@ def main():
                                         None,
                                         False)
 
+    # # set pinned for memory
+    # pinned_node_memory_buffs, pinned_node_memory_ts_buffs, \
+    # pinned_mailbox_buffs, pinned_mailbox_ts_buffs = allocate_pinned_memory_buffers(
+    #     model_config['fanouts'],
+    #     model_config['num_snapshots'],
+    #     batch_size, model_config['dim_memory'],
+    #     2 * model_config['dim_memory'] + dim_edge)
+    # if args.distributed:
+    #     model.module.memory.set_pinned(pinned_node_memory_buffs, pinned_node_memory_ts_buffs, pinned_mailbox_buffs, pinned_mailbox_ts_buffs)
+    # else:
+    #     model.memory.set_pinned(pinned_node_memory_buffs, pinned_node_memory_ts_buffs, pinned_mailbox_buffs, pinned_mailbox_ts_buffs)
+
     # only gnnlab static need to pass param
     if args.cache == 'GNNLabStaticCache':
         cache.init_cache(sampler=sampler, train_df=train_data,
@@ -404,6 +416,9 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         else:
             mfgs = node_to_dgl_blocks(target_nodes, ts)
             block = None
+        mfgs_to_cuda(mfgs, device)
+        mfgs = cache.fetch_feature(
+            mfgs, eid)
         # mfgs = sampler.sample(target_nodes, ts)
         next_data = (mfgs, eid, block)
 
@@ -437,7 +452,6 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
 
         train_iter = iter(train_loader)
         target_nodes, ts, eid = next(train_iter)
-        
         if sampler is not None:
             model_name = type(model.module).__name__ if args.distributed else type(model).__name__
             if model_name == 'APAN':
@@ -451,6 +465,11 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         else:
             mfgs = node_to_dgl_blocks(target_nodes, ts)
             block = None
+        
+        mfgs_to_cuda(mfgs, device)
+        # feature_start_time = time.time()
+        mfgs = cache.fetch_feature(
+            mfgs, eid)
         # mfgs = sampler.sample(target_nodes, ts)
         next_data = (mfgs, eid, block)
 
@@ -475,11 +494,11 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
             sampling_thread.start()
 
             # Feature
-            mfgs_to_cuda(mfgs, device)
-            feature_start_time = time.time()
-            mfgs = cache.fetch_feature(
-                mfgs, eid)
-            total_feature_fetch_time += time.time() - feature_start_time
+            # mfgs_to_cuda(mfgs, device)
+            # feature_start_time = time.time()
+            # mfgs = cache.fetch_feature(
+            #     mfgs, eid)
+            # total_feature_fetch_time += time.time() - feature_start_time
 
             if args.use_memory:
                 b = mfgs[0][0]  # type: DGLBlock
@@ -519,11 +538,11 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
                     memory_write_back_start_time = time.time()
                     if args.distributed:
                         model.module.memory.update_mem_mail(
-                            **model.module.last_updated, edge_feats=cache.target_edge_features,
+                            **model.module.last_updated, edge_feats=cache.target_edge_features.get(),
                             neg_sample_ratio=1, block=block)
                     else:
                         model.memory.update_mem_mail(
-                            **model.last_updated, edge_feats=cache.target_edge_features,
+                            **model.last_updated, edge_feats=cache.target_edge_features.get(),
                             neg_sample_ratio=1, block=block)
                     total_memory_write_back_time += time.time() - memory_write_back_start_time
 
@@ -551,6 +570,60 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
                 if args.rank == 0:
                     logging.info('Epoch {:d}/{:d} | Iter {:d}/{:d} | Throughput {:.2f} samples/s | Loss {:.4f} | Cache node ratio {:.4f} | Cache edge ratio {:.4f} | Total Sampling Time {:.2f}s | Total Feature Fetching Time {:.2f}s | Total Memory Fetching Time {:.2f}s | Total Memory Update Time {:.2f}s | Total Memory Write Back Time {:.2f}s | Total Model Train Time {:.2f}s | Total Time {:.2f}s'.format(e + 1, args.epoch, i + 1, int(len(
                         train_loader)/args.world_size), total_samples * args.world_size / (time.time() - epoch_time_start), total_loss / (i + 1), cache_node_ratio_sum / (i + 1), cache_edge_ratio_sum / (i + 1), total_sampling_time, total_feature_fetch_time, total_memory_fetch_time, total_memory_update_time, total_memory_write_back_time, total_model_train_time, time.time() - epoch_time_start))
+
+        # last iter
+        mfgs, eid, block = next_data
+        num_target_nodes = len(eid) * 3
+        if args.use_memory:
+                b = mfgs[0][0]  # type: DGLBlock
+                if args.distributed:
+                    memory_fetch_start_time = time.time()
+                    model.module.memory.prepare_input(b)
+                    total_memory_fetch_time += time.time() - memory_fetch_start_time
+
+                    memory_update_start_time = time.time()
+                    model.module.last_updated = model.module.memory_updater(b)
+                    total_memory_update_time += time.time() - memory_update_start_time
+                else:
+                    memory_fetch_start_time = time.time()
+                    model.memory.prepare_input(b)
+                    total_memory_fetch_time += time.time() - memory_fetch_start_time
+
+                    memory_update_start_time = time.time()
+                    model.last_updated = model.memory_updater(b)
+                    total_memory_update_time += time.time() - memory_update_start_time
+
+        # Train
+        model_train_start_time = time.time()
+        optimizer.zero_grad()
+        pred_pos, pred_neg = model(mfgs)
+
+        loss = criterion(pred_pos, torch.ones_like(pred_pos))
+        loss += criterion(pred_neg, torch.zeros_like(pred_neg))
+        total_loss += float(loss) * len(target_nodes)
+        loss.backward()
+        optimizer.step()
+        total_model_train_time += time.time() - model_train_start_time
+
+        if args.use_memory:
+            # NB: no need to do backward here
+            with torch.no_grad():
+                # use one function
+                memory_write_back_start_time = time.time()
+                if args.distributed:
+                    model.module.memory.update_mem_mail(
+                        **model.module.last_updated, edge_feats=cache.target_edge_features.get(),
+                        neg_sample_ratio=1, block=block)
+                else:
+                    model.memory.update_mem_mail(
+                        **model.last_updated, edge_feats=cache.target_edge_features.get(),
+                        neg_sample_ratio=1, block=block)
+                total_memory_write_back_time += time.time() - memory_write_back_start_time
+
+        cache_edge_ratio_sum += cache.cache_edge_ratio
+        cache_node_ratio_sum += cache.cache_node_ratio
+        total_samples += num_target_nodes
+        i += 1
 
         epoch_time = time.time() - epoch_time_start
         epoch_time_sum += epoch_time

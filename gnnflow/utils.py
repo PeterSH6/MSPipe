@@ -503,6 +503,37 @@ def get_pinned_buffers(
 
     return pinned_nfeat_buffs, pinned_efeat_buffs
 
+def allocate_pinned_memory_buffers(fanouts, sample_history, batch_size, dim_memory, dim_raw_message):
+    limit = int(batch_size * 3.3)
+    for i in fanouts:
+        limit *= i + 1
+    pinned_node_memory_buffs = list()
+    pinned_node_memory_ts_buffs = list()
+    pinned_mailbox_buffs = list()
+    pinned_mailbox_ts_buffs = list()
+    for _ in range(sample_history):
+        pinned_node_memory_buffs.append(torch.zeros((limit, dim_memory), pin_memory=True))
+        pinned_node_memory_ts_buffs.append(torch.zeros((limit,), pin_memory=True))
+        pinned_mailbox_buffs.append(torch.zeros((limit, dim_raw_message), pin_memory=True))
+        pinned_mailbox_ts_buffs.append(torch.zeros((limit, ), pin_memory=True))
+
+    return pinned_node_memory_buffs, pinned_node_memory_ts_buffs, pinned_mailbox_buffs, pinned_mailbox_ts_buffs
+
+def allocate_pinned_apan_memory_buffers(fanouts, sample_history, batch_size, dim_memory, dim_raw_message, mailbox_shape):
+    limit = int(batch_size * 3.3)
+    for i in fanouts:
+        limit *= i + 1
+    pinned_node_memory_buffs = list()
+    pinned_node_memory_ts_buffs = list()
+    pinned_mailbox_buffs = list()
+    pinned_mailbox_ts_buffs = list()
+    for _ in range(sample_history):
+        pinned_node_memory_buffs.append(torch.zeros((limit, dim_memory), pin_memory=True))
+        pinned_node_memory_ts_buffs.append(torch.zeros((limit,), pin_memory=True))
+        pinned_mailbox_buffs.append(torch.zeros((limit, mailbox_shape, dim_raw_message), pin_memory=True))
+        pinned_mailbox_ts_buffs.append(torch.zeros((limit, mailbox_shape), pin_memory=True))
+
+    return pinned_node_memory_buffs, pinned_node_memory_ts_buffs, pinned_mailbox_buffs, pinned_mailbox_ts_buffs
 
 class NegLinkSampler:
 

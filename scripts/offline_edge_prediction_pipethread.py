@@ -33,7 +33,7 @@ from gnnflow.models.gat import GAT
 from gnnflow.models.graphsage import SAGE
 from gnnflow.models.jodie import JODIE
 from gnnflow.temporal_sampler import TemporalSampler
-from gnnflow.utils import (DstRandEdgeSampler, EarlyStopMonitor,
+from gnnflow.utils import (DstRandEdgeSampler, EarlyStopMonitor, allocate_pinned_apan_memory_buffers, allocate_pinned_memory_buffers,
                            build_dynamic_graph, get_pinned_buffers,
                            get_project_root_dir, load_dataset, load_feat,
                            mfgs_to_cuda, node_to_dgl_blocks)
@@ -111,7 +111,30 @@ def gpu_load():
         time.sleep(1)
 
 
-def evaluate(dataloader, sampler, model, criterion, cache, device):
+def neg_sample(target_nodes, ts, nodes):
+    batch_size = len(target_nodes) // 3
+    target_pos = len(target_nodes) * 2 // 3
+    num_nodes = len(nodes)
+    target_nodes_pos = target_nodes[:target_pos]
+    ts_pos = ts[:batch_size]
+    dst = target_nodes[target_pos:2 * target_pos]
+    neg_sample = None
+    for i in range(batch_size):
+        temp = np.delete(nodes, np.where(nodes == dst[i]))
+        temp = np.reshape(temp, (len(temp), 1))
+        if neg_sample is None:
+            neg_sample = temp
+        else:
+            neg_sample = np.hstack([neg_sample, temp])
+    num_neg = neg_sample.shape[0]
+    neg_sample = neg_sample.flatten('C')
+    target_nodes = np.concatenate([target_nodes_pos, neg_sample])
+    ts = np.tile(ts_pos, num_neg + 2)
+    return target_nodes, ts, num_neg
+    
+
+
+def evaluate(dataloader, sampler, model, criterion, cache, device, nodes=None, num_neg=1):
     model.eval()
     val_losses = list()
     aps = list()
@@ -120,6 +143,10 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
     with torch.no_grad():
         total_loss = 0
         for target_nodes, ts, eid in dataloader:
+            # if nodes is not None:
+            #     target_nodes, ts, num_neg = neg_sample(target_nodes, ts, nodes)
+            # logging.info('target_nodes: {}'.format(target_nodes.shape))
+            # logging.info('target_nodes: {}'.format(ts.shape))
             if sampler is not None:
                 model_name = type(model.module).__name__ if args.distributed else type(model).__name__
                 if model_name == 'APAN':
@@ -133,6 +160,7 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
             else:
                 mfgs = node_to_dgl_blocks(target_nodes, ts)
                 block = None
+
             mfgs_to_cuda(mfgs, device)
             mfgs = cache.fetch_feature(
                 mfgs, eid)
@@ -146,7 +174,7 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
                     model.memory.prepare_input(b)
                     model.last_updated = model.memory_updater(b)
 
-            pred_pos, pred_neg = model(mfgs)
+            pred_pos, pred_neg = model(mfgs, neg_samples=num_neg)
 
             if args.use_memory:
                 # NB: no need to do backward here
@@ -154,11 +182,11 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
                 if args.distributed:
                     model.module.memory.update_mem_mail(
                         **model.module.last_updated, edge_feats=cache.target_edge_features.get(),
-                        neg_sample_ratio=1, block=block)
+                        neg_sample_ratio=num_neg, block=block)
                 else:
                     model.memory.update_mem_mail(
                         **model.last_updated, edge_feats=cache.target_edge_features.get(),
-                        neg_sample_ratio=1, block=block)
+                        neg_sample_ratio=num_neg, block=block)
 
             total_loss += criterion(pred_pos, torch.ones_like(pred_pos))
             total_loss += criterion(pred_neg, torch.zeros_like(pred_neg))
@@ -166,14 +194,21 @@ def evaluate(dataloader, sampler, model, criterion, cache, device):
             y_true = torch.cat(
                 [torch.ones(pred_pos.size(0)),
                  torch.zeros(pred_neg.size(0))], dim=0)
-            aucs_mrrs.append(roc_auc_score(y_true, y_pred))
+            if num_neg > 1:
+                aucs_mrrs.append(torch.reciprocal(torch.sum(pred_pos.squeeze() < pred_neg.squeeze().reshape(num_neg, -1), dim=0) + 1).type(torch.float))
+            else:
+                aucs_mrrs.append(roc_auc_score(y_true, y_pred))
             aps.append(average_precision_score(y_true, y_pred))
 
         val_losses.append(float(total_loss))
 
     ap = float(torch.tensor(aps).mean())
-    auc_mrr = float(torch.tensor(aucs_mrrs).mean())
+    if num_neg > 1:
+        auc_mrr = float(torch.cat(aucs_mrrs).mean())
+    else:
+        auc_mrr = float(torch.tensor(aucs_mrrs).mean())
     return ap, auc_mrr
+
 
 
 def main():
@@ -233,6 +268,7 @@ def main():
     # NB: learning rate is scaled by the number of workers
     args.lr = args.lr * math.sqrt(args.world_size)
     logging.info("batch size: {}, lr: {}".format(batch_size, args.lr))
+    # test_batch_size = batch_size // (args.world_size * 10)
     test_batch_size = batch_size // args.world_size
     logging.info("test batch size: {}".format(test_batch_size))
 
@@ -323,11 +359,10 @@ def main():
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.local_rank], find_unused_parameters=True)
 
-    pinned_nfeat_buffs = None
-    pinned_efeat_buffs = None
-    # pinned_nfeat_buffs, pinned_efeat_buffs = get_pinned_buffers(
-    #     model_config['fanouts'], model_config['num_snapshots'], batch_size,
-    #     dim_node, dim_edge)
+    # pinned_nfeat_buffs, pinned_efeat_buffs = None, None
+    pinned_nfeat_buffs, pinned_efeat_buffs = get_pinned_buffers(
+        model_config['fanouts'], model_config['num_snapshots'], batch_size,
+        dim_node, dim_edge)
 
     # Cache
     cache = caches.__dict__[args.cache](args.edge_cache_ratio, args.node_cache_ratio,
@@ -338,6 +373,27 @@ def main():
                                         pinned_efeat_buffs,
                                         None,
                                         False)
+
+    # # set pinned for memory
+    if args.model == 'APAN':
+        pinned_node_memory_buffs, pinned_node_memory_ts_buffs, \
+        pinned_mailbox_buffs, pinned_mailbox_ts_buffs = allocate_pinned_apan_memory_buffers(
+            model_config['fanouts'],
+            model_config['num_snapshots'],
+            batch_size, model_config['dim_memory'],
+            2 * model_config['dim_memory'] + dim_edge,
+            mailbox_shape=10)
+    else:
+        pinned_node_memory_buffs, pinned_node_memory_ts_buffs, \
+        pinned_mailbox_buffs, pinned_mailbox_ts_buffs = allocate_pinned_memory_buffers(
+            model_config['fanouts'],
+            model_config['num_snapshots'],
+            batch_size, model_config['dim_memory'],
+            2 * model_config['dim_memory'] + dim_edge)
+    if args.distributed:
+        model.module.memory.set_pinned(pinned_node_memory_buffs, pinned_node_memory_ts_buffs, pinned_mailbox_buffs, pinned_mailbox_ts_buffs)
+    else:
+        model.memory.set_pinned(pinned_node_memory_buffs, pinned_node_memory_ts_buffs, pinned_mailbox_buffs, pinned_mailbox_ts_buffs)
 
     # only gnnlab static need to pass param
     if args.cache == 'GNNLabStaticCache':
@@ -355,17 +411,19 @@ def main():
     best_e = train(train_loader, val_loader, sampler,
                    model, optimizer, criterion, cache, device,test_loader)
 
-    # logging.info('Loading model at epoch {}...'.format(best_e))
-    # ckpt = torch.load(checkpoint_path)
-    # if args.distributed:
-    #     model.module.load_state_dict(ckpt['model'])
-    # else:
-    #     model.load_state_dict(ckpt['model'])
-    # if args.use_memory:
-    #     if args.distributed:
-    #         model.module.memory.restore(ckpt['memory'])
-    #     else:
-    #         model.memory.restore(ckpt['memory'])
+    logging.info('Loading model at epoch {}...'.format(best_e))
+    ckpt = torch.load(checkpoint_path)
+    if args.distributed:
+        model.module.load_state_dict(ckpt['model'])
+    else:
+        model.load_state_dict(ckpt['model'])
+    if args.use_memory:
+        if args.distributed:
+            model.module.memory.restore(ckpt['memory'])
+        else:
+            model.memory.restore(ckpt['memory'])
+
+    all_nodes = dgraph.nodes()
 
     ap, auc = evaluate(test_loader, sampler, model,
                        criterion, cache, device)
@@ -384,7 +442,9 @@ def main():
 
 
 sampling_time_sum = 0
-
+# global iter_mem_update
+iter_mem_update = 0
+# global iter_mem_update
 
 def train(train_loader, val_loader, sampler, model, optimizer, criterion,
           cache, device, test_loader):
@@ -437,6 +497,8 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
 
         pool = ThreadPool(processes=num_process)
         epoch_time_start = time.time()
+        # global iter_mem_update
+        # iter_mem_update = 0
 
     
         for i, (target_nodes, ts, eid) in enumerate(train_loader):
@@ -459,7 +521,7 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         epoch_time = time.time() - epoch_time_start
         epoch_time_sum += epoch_time
 
-        logging.info("epoch time: {}".format(epoch_time))
+        # logging.info("epoch time: {}".format(epoch_time))
 
         # Validation
         val_start = time.time()

@@ -4,6 +4,7 @@ This code is based on the implementation of TGL's layer module.
 Implementation at:
     https://github.com/amazon-research/tgl/blob/main/layers.py
 """
+import logging
 import math
 import dgl
 import dgl.function as fn
@@ -33,6 +34,29 @@ class TimeEncode(torch.nn.Module):
 
     def forward(self, delta_time: torch.Tensor):
         output = torch.cos(self.w(delta_time.reshape((-1, 1))))
+        return output
+
+class FixTimeEncode(nn.Module):
+    """
+    out = linear(time_scatter): 1-->time_dims
+    out = cos(out)
+    """
+    def __init__(self, dim):
+        super(FixTimeEncode, self).__init__()
+        self.dim = dim
+        self.w = nn.Linear(1, dim)
+        self.reset_parameters()
+    
+    def reset_parameters(self, ):
+        self.w.weight = nn.Parameter((torch.from_numpy(1 / 10 ** np.linspace(0, 9, self.dim, dtype=np.float32))).reshape(self.dim, -1))
+        self.w.bias = nn.Parameter(torch.zeros(self.dim))
+
+        self.w.weight.requires_grad = False
+        self.w.bias.requires_grad = False
+    
+    @torch.no_grad()
+    def forward(self, t):
+        output = torch.cos(self.w(t.reshape((-1, 1))))
         return output
 
 
@@ -71,6 +95,7 @@ class TransfomerAttentionLayer(torch.nn.Module):
 
         if self.use_time_enc:
             self.time_enc = TimeEncode(dim_time)
+            # self.time_enc = FixTimeEncode(dim_time)
 
         if self.use_node_feat or self.use_time_enc:
             self.w_q = torch.nn.Linear(dim_node + dim_time, dim_out)
@@ -184,17 +209,18 @@ class EdgePredictor(torch.nn.Module):
         self.dst_fc = torch.nn.Linear(dim_embed, dim_embed)
         self.out_fc = torch.nn.Linear(dim_embed, 1)
 
-    def forward(self, h: torch.Tensor):
+    def forward(self, h: torch.Tensor, neg_samples: int = 1):
         """
         Args:
             h: embeddings of source, destination and negative sampling nodes
         """
-        src_h, pos_dst_h, neg_dst_h = h.tensor_split(3)
+        num_edge = h.shape[0] // (neg_samples + 2)
+        src_h, pos_dst_h, neg_dst_h = h.tensor_split((num_edge, 2 * num_edge))
         src_h = self.src_fc(src_h)
         pos_dst_h = self.dst_fc(pos_dst_h)
         neg_dst_h = self.dst_fc(neg_dst_h)
         pos_edge = F.relu(src_h + pos_dst_h)
-        neg_edge = F.relu(src_h + neg_dst_h)
+        neg_edge = F.relu(src_h.tile(neg_samples, 1) + neg_dst_h)
         return self.out_fc(pos_edge), self.out_fc(neg_edge)
 
 

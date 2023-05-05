@@ -1,4 +1,5 @@
 import collections
+from operator import neg
 import re
 from typing import Iterable, Iterator, List, Optional, Union
 
@@ -27,21 +28,30 @@ class EdgePredictionDataset(Dataset):
     """
 
     def __init__(self, data: pd.DataFrame,
-                 neg_sampler: Optional[DstRandEdgeSampler] = None):
+                 neg_sampler: Optional[DstRandEdgeSampler] = None,
+                 neg_num: int = 1):
         super(EdgePredictionDataset, self).__init__()
         self.data = data
         self.length = np.max(np.array(data['dst'], dtype=int))
         self.neg_sampler = neg_sampler
+        self.neg_num = neg_num
 
     def __getitem__(self, index):
         row = self.data.iloc[index]
         if self.neg_sampler is not None:
-            neg_batch = self.neg_sampler.sample(len(row.src.values))
+            if self.neg_num > 1:
+                for i in range(self.neg_num):
+                    if i == 0:
+                        neg_batch = self.neg_sampler.sample(len(row.src.values))
+                    else:
+                        neg_batch = np.concatenate([neg_batch, self.neg_sampler.sample(len(row.src.values))])
+            else:
+                neg_batch = self.neg_sampler.sample(len(row.src.values))
             target_nodes = np.concatenate(
                 [row.src.values, row.dst.values, neg_batch]).astype(
                 np.int64)
             ts = np.concatenate(
-                [row.time.values, row.time.values, row.time.values]).astype(
+                [row.time.values, row.time.values, np.tile(row.time.values, self.neg_num)]).astype(
                 np.float32)
         else:
             target_nodes = np.concatenate(
