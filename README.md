@@ -1,8 +1,6 @@
-# GNNFlow
+# MSPipe
 
-A comprehensive framework for training graph neural networks on dynamic graphs.
-
-NB: this is an ongoing work.
+MSPipe: Minimal Staleness Pipeline for Scalable Temporal GNN Training
 
 ## Install
 
