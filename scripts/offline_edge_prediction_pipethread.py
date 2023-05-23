@@ -82,7 +82,6 @@ logging.info(args)
 checkpoint_path = os.path.join(get_project_root_dir(),
                                '{}.pt'.format(args.model))
 
-# mp.set_start_method('spawn', force=True)
 
 
 def set_seed(seed):
@@ -143,10 +142,6 @@ def evaluate(dataloader, sampler, model, criterion, cache, device, nodes=None, n
     with torch.no_grad():
         total_loss = 0
         for target_nodes, ts, eid in dataloader:
-            # if nodes is not None:
-            #     target_nodes, ts, num_neg = neg_sample(target_nodes, ts, nodes)
-            # logging.info('target_nodes: {}'.format(target_nodes.shape))
-            # logging.info('target_nodes: {}'.format(ts.shape))
             if sampler is not None:
                 model_name = type(model.module).__name__ if args.distributed else type(model).__name__
                 if model_name == 'APAN':
@@ -241,15 +236,7 @@ def main():
         (full_data['src'], full_data['dst']))))
     logging.info("train_num_nodes: {} full_num_nodes: {}".format(
         train_num_nodes, full_num_nodes))
-    # train_rand_sampler = NegLinkSampler(train_num_nodes)
-    # val_rand_sampler = NegLinkSampler(full_num_nodes)
-    # test_rand_sampler = NegLinkSampler(full_num_nodes)
-    # train_rand_sampler = DstRandEdgeSampler(
-    #     train_data['dst'].to_numpy(dtype=np.int32))
-    # val_rand_sampler = DstRandEdgeSampler(
-    #     full_data['dst'].to_numpy(dtype=np.int32))
-    # test_rand_sampler = DstRandEdgeSampler(
-    #     full_data['dst'].to_numpy(dtype=np.int32))
+
     train_rand_sampler = DstRandEdgeSampler(
         np.concatenate((train_data['src'].to_numpy(dtype=np.int32),
                         train_data['dst'].to_numpy(dtype=np.int32))))
@@ -412,59 +399,26 @@ def main():
     # most_similar = load_most_similar('/home/gmsheng/repos/TGNN-Staleness/{}_most_similar_2.npy'.format(args.data))
     # most_similar = most_similar[:, 0:10]
     best_e = train(train_loader, val_loader, sampler,
-                   model, optimizer, criterion, cache, device,test_loader, most_similar)
-
-    logging.info('Loading model at epoch {}...'.format(best_e))
-    ckpt = torch.load(checkpoint_path)
-    if args.distributed:
-        model.module.load_state_dict(ckpt['model'])
-    else:
-        model.load_state_dict(ckpt['model'])
-    if args.use_memory:
-        if args.distributed:
-            model.module.memory.restore(ckpt['memory'])
-        else:
-            model.memory.restore(ckpt['memory'])
-
-    all_nodes = dgraph.nodes()
-
-    ap, auc = evaluate(test_loader, sampler, model,
-                       criterion, cache, device)
-    if args.distributed:
-        metrics = torch.tensor([ap, auc], device=device)
-        torch.distributed.all_reduce(metrics)
-        metrics /= args.world_size
-        ap, auc = metrics.tolist()
-        if args.rank == 0:
-            logging.info('Test ap:{:4f}  test auc:{:4f}'.format(ap, auc))
-    else:
-        logging.info('Test ap:{:4f}  test auc:{:4f}'.format(ap, auc))
+                   model, optimizer, criterion, cache, device,test_loader)
+    
+    if args.rank == 0:
+        logging.info('The best ap is reached at epoch {}...'.format(best_e))
 
     if args.distributed:
         torch.distributed.barrier()
 
 
 sampling_time_sum = 0
-# global iter_mem_update
 iter_mem_update = 0
-# global iter_mem_update
 
 def train(train_loader, val_loader, sampler, model, optimizer, criterion,
           cache, device, test_loader, most_similar=None):
     global training
     best_ap = 0
+    best_test_ap = 0
+    best_test_auc = 0
     best_e = 0
     epoch_time_sum = 0
-    early_stopper = EarlyStopMonitor()
-
-    feature_fetch_sum = 0
-    memory_fetch_sum = 0
-    memory_update_sum = 0
-    memory_write_back_sum = 0
-    model_train_sum = 0
-    iter_time_sum = 0
-    join_time_sum = 0
-    start_thread_sum = 0
 
     # create threadpool
     num_process = 3
@@ -473,9 +427,6 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
 
     lock_pool = [Lock() for _ in range(5)]  # 5 stages
     signal_queue = Queue(maxsize=4)
-    # signal_queue.put(1)
-    # model_lock = Lock()
-    avg_cos_list = []
 
     logging.info('Start training...')
     for e in range(args.epoch):
@@ -499,13 +450,9 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
 
         pool = ThreadPool(processes=num_process)
         epoch_time_start = time.time()
-        # global iter_mem_update
-        # iter_mem_update = 0
 
     
         for i, (target_nodes, ts, eid) in enumerate(train_loader):
-            # training_batch(model, sampler, cache, target_nodes,
-                                                #    ts, eid, device, args.distributed, optimizer, criterion, stream_pool[i % num_process], signal_queue, lock_pool, i, args.rank, most_similar)
             pool.apply_async(training_batch, args=(model, sampler, cache, target_nodes,
                                                    ts, eid, device, args.distributed, optimizer, criterion, stream_pool[i % num_process], signal_queue, lock_pool, i, args.rank, most_similar))
 
@@ -530,7 +477,6 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
 
         ap, auc = evaluate(test_loader, sampler, model,
                            criterion, cache, device)
-        # ap, auc = [0, 0]
 
         if args.distributed:
             val_res = torch.tensor([val_ap, val_auc, ap, auc]).to(device)
@@ -556,23 +502,15 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
                 total_model_train_time = metrics.tolist()
 
         if args.rank == 0:
-            global sampling_time_sum
-            sampling_time_sum += total_sampling_time
-            feature_fetch_sum += total_feature_fetch_time
-            memory_fetch_sum += total_memory_fetch_time
-            memory_update_sum += total_memory_update_time
-            memory_write_back_sum += total_memory_write_back_time
-            model_train_sum += total_model_train_time
             logging.info("Epoch {:d}/{:d} | Validation ap {:.4f} | Validation auc {:.4f} | Train time {:.2f} s | Validation time {:.2f} s | Train Throughput {:.2f} samples/s |".format(
                 e + 1, args.epoch, val_ap, val_auc, epoch_time, val_time, total_samples * args.world_size / epoch_time))
             logging.info('Test ap:{:4f}  test auc:{:4f}'.format(ap, auc))
-            # logging.info("Epoch {:d}/{:d} | Validation ap {:.4f} | Validation auc {:.4f} | Train time {:.2f} s | Validation time {:.2f} s | Train Throughput {:.2f} samples/s | Cache node ratio {:.4f} | Cache edge ratio {:.4f} | Total Sampling Time {:.2f}s | Total Feature Fetching Time {:.2f}s | Total Memory Fetching Time {:.2f}s | Total Memory Update Time {:.2f}s | Total Memory Write Back Time {:.2f}s | Total Model Train Time {:.2f}s".format(
-
-            #     e + 1, args.epoch, val_ap, val_auc, epoch_time, val_time, total_samples * args.world_size / epoch_time, cache_node_ratio_sum / (i + 1), cache_edge_ratio_sum / (i + 1), total_sampling_time, total_feature_fetch_time, total_memory_fetch_time, total_memory_update_time, total_memory_write_back_time, total_model_train_time))
 
         if args.rank == 0 and val_ap > best_ap:
             best_e = e + 1
             best_ap = val_ap
+            best_test_auc = auc
+            best_test_ap = ap
             if args.distributed:
                 model_to_save = model.module
             else:
@@ -584,29 +522,9 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
             logging.info(
                 "Best val AP: {:.4f} & val AUC: {:.4f}".format(val_ap, val_auc))
 
-        # if early_stopper.early_stop_check(val_ap):
-        #     logging.info("Early stop at epoch {}".format(e))
-        #     break
 
     if args.rank == 0:
         logging.info('Avg epoch time: {}'.format(epoch_time_sum / args.epoch))
-        # logging.info('Avg sample time: {}'.format(
-        #     sampling_time_sum / args.epoch))
-        # logging.info('Avg fetch time: {}'.format(
-        #     feature_fetch_sum / args.epoch))
-        # logging.info('Avg model time: {}'.format(model_train_sum / args.epoch))
-        # logging.info('Avg fetch mem time: {}'.format(
-        #     memory_fetch_sum / args.epoch))
-        # logging.info('Avg updater time: {}'.format(
-        #     memory_update_sum / args.epoch))
-        # logging.info('Avg update mem time: {}'.format(
-        #     memory_write_back_sum / args.epoch))
-        # logging.info('Avg join time: {}'.format(
-        #     join_time_sum / args.epoch))
-        # logging.info('Avg thread start time: {}'.format(
-        #     start_thread_sum / args.epoch))
-        # logging.info('Avg iter time: {}'.format(
-        #     iter_time_sum / args.epoch))
 
     if args.distributed:
         torch.distributed.barrier()

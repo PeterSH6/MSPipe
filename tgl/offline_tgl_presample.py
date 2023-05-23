@@ -47,7 +47,7 @@ parser.add_argument("--model", choices=model_names, required=True,
 parser.add_argument("--data", choices=datasets, required=True,
                     help="dataset:" + '|'.join(datasets))
 parser.add_argument("--epoch", help="maximum training epoch",
-                    type=int, default=10)
+                    type=int, default=100)
 parser.add_argument("--lr", help='learning rate', type=float, default=0.0001)
 parser.add_argument("--num-workers", help="num workers for dataloaders",
                     type=int, default=8)
@@ -135,10 +135,6 @@ def evaluate(dataloader, sampler, model, criterion, cache, device, nodes=None, n
     with torch.no_grad():
         total_loss = 0
         for target_nodes, ts, eid in dataloader:
-            # if nodes is not None:
-            #     target_nodes, ts, num_neg = neg_sample(target_nodes, ts, nodes)
-            # logging.info('target_nodes: {}'.format(target_nodes.shape))
-            # logging.info('target_nodes: {}'.format(ts.shape))
             if sampler is not None:
                 model_name = type(model.module).__name__ if args.distributed else type(model).__name__
                 if model_name == 'APAN':
@@ -237,15 +233,7 @@ def main():
         (full_data['src'], full_data['dst']))))
     logging.info("train_num_nodes: {} full_num_nodes: {}".format(
         train_num_nodes, full_num_nodes))
-    # train_rand_sampler = NegLinkSampler(train_num_nodes)
-    # val_rand_sampler = NegLinkSampler(full_num_nodes)
-    # test_rand_sampler = NegLinkSampler(full_num_nodes)
-    # train_rand_sampler = DstRandEdgeSampler(
-    #     train_data['dst'].to_numpy(dtype=np.int32))
-    # val_rand_sampler = DstRandEdgeSampler(
-    #     full_data['dst'].to_numpy(dtype=np.int32))
-    # test_rand_sampler = DstRandEdgeSampler(
-    #     full_data['dst'].to_numpy(dtype=np.int32))
+
     train_rand_sampler = DstRandEdgeSampler(
         np.concatenate((train_data['src'].to_numpy(dtype=np.int32),
                         train_data['dst'].to_numpy(dtype=np.int32))))
@@ -300,8 +288,6 @@ def main():
         test_ds, sampler=test_sampler,
         collate_fn=default_collate_ndarray, num_workers=args.num_workers)
 
-    # dgraph = build_dynamic_graph(
-    #     **data_config, device=args.local_rank)
     g = load_graph(args.data)
     num_nodes = g['indptr'].shape[0] - 1
 
@@ -338,10 +324,6 @@ def main():
     if type(model).__name__ == 'JODIE':
         sampler = None
     else:
-        # sampler = ParallelSampler(g['indptr'], g['indices'], g['eid'], g['ts'].astype(np.float32),
-        #                       sample_param['num_thread'], 1, sample_param['layer'], sample_param['neighbor'],
-        #                       sample_param['strategy']=='recent', sample_param['prop_time'],
-        #                       sample_param['history'], float(sample_param['duration']))
         sampler = ParallelSampler(g['indptr'], g['indices'], g['eid'], g['ts'].astype(np.float32),
                               16, 1, 1, [10], True, False, 1, float(0))
 
@@ -417,13 +399,8 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
     best_ap = 0
     best_e = 0
     epoch_time_sum = 0
-    sampling_time_sum = 0
-    feature_fetch_time_sum = 0
-    memory_fetch_time_sum = 0
-    memory_update_time_sum = 0
-    memory_write_back_time_sum = 0
-    model_train_time_sum = 0
-    early_stopper = EarlyStopMonitor()
+    best_test_ap = 0
+    best_test_auc = 0
 
     next_data = None
 
@@ -451,7 +428,6 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         mfgs_to_cuda(mfgs, device)
         mfgs = cache.fetch_feature(
             mfgs, eid)
-        # mfgs = sampler.sample(target_nodes, ts)
         next_data = (mfgs, eid, block)
 
     if args.local_rank == 0:
@@ -505,10 +481,9 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
             block = None
         
         mfgs_to_cuda(mfgs, device)
-        # feature_start_time = time.time()
+
         mfgs = cache.fetch_feature(
             mfgs, eid)
-        # mfgs = sampler.sample(target_nodes, ts)
         next_data = (mfgs, eid, block)
 
         sampling_thread = None
@@ -522,7 +497,7 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
             mfgs, eid, block = next_data
             num_target_nodes = len(eid) * 3
 
-            # Sampling for next batch
+
             try:
                 next_target_nodes, next_ts, next_eid = next(train_iter)
             except StopIteration:
@@ -530,13 +505,6 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
             sampling_thread = threading.Thread(target=sampling, args=(
                 next_target_nodes, next_ts, next_eid))
             sampling_thread.start()
-
-            # Feature
-            # mfgs_to_cuda(mfgs, device)
-            # feature_start_time = time.time()
-            # mfgs = cache.fetch_feature(
-            #     mfgs, eid)
-            # total_feature_fetch_time += time.time() - feature_start_time
 
             if args.use_memory:
                 b = mfgs[0][0]  # type: DGLBlock
@@ -707,6 +675,8 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         if args.rank == 0 and val_ap > best_ap:
             best_e = e + 1
             best_ap = val_ap
+            best_test_auc = auc
+            best_test_ap = ap
             if args.distributed:
                 model_to_save = model.module
             else:
@@ -718,24 +688,9 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
             logging.info(
                 "Best val AP: {:.4f} & val AUC: {:.4f}".format(val_ap, val_auc))
 
-        # if early_stopper.early_stop_check(val_ap):
-        #     logging.info("Early stop at epoch {}".format(e))
-        #     break
 
     if args.rank == 0:
         logging.info('Avg epoch time: {}'.format(epoch_time_sum / args.epoch))
-        logging.info('Avg sample time: {}'.format(
-            sampling_time_sum / args.epoch))
-        logging.info('Avg feature fetch time: {}'.format(
-            feature_fetch_time_sum / args.epoch))
-        logging.info('Avg memory fetch time: {}'.format(
-            memory_fetch_time_sum / args.epoch))
-        logging.info('Avg memory update time: {}'.format(
-            memory_update_time_sum / args.epoch))
-        logging.info('Avg gnn train time: {}'.format(
-            model_train_time_sum / args.epoch))
-        logging.info('Avg memory write back time: {}'.format(
-            memory_write_back_time_sum / args.epoch))
 
     if args.distributed:
         torch.distributed.barrier()

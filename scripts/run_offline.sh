@@ -24,4 +24,4 @@ else
 fi
 
 echo $cmd
-OMP_NUM_THREADS=8 exec $cmd > ${MODEL}_${DATA}_${NODE_CACHE_RATIO}_MSPipe.log 2>&1
+OMP_NUM_THREADS=8 exec $cmd > ${MODEL}_${DATA}_${NPROC_PER_NODE}_MSPipe.log 2>&1
