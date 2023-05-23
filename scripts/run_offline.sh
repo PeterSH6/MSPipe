@@ -2,11 +2,11 @@
 
 MODEL=$1
 DATA=$2
-CACHE="${3:-LFUCache}"
-EDGE_CACHE_RATIO="${4:-0.2}" # default 20% of cache
-NODE_CACHE_RATIO="${5:-0.2}" # default 20% of cache
-TIME_WINDOW="${6:-0}" # default 0
-NPROC_PER_NODE=${7:-1}
+NPROC_PER_NODE=${3:-1}
+CACHE="${4:-LRUCache}"
+EDGE_CACHE_RATIO="${5:-0}" # default 0% of cache
+NODE_CACHE_RATIO="${6:-0}" # default 0% of cache
+TIME_WINDOW="${7:-0}" # default 0
 
 if [[ $NPROC_PER_NODE -gt 1 ]]; then
     cmd="torchrun \
@@ -17,11 +17,11 @@ if [[ $NPROC_PER_NODE -gt 1 ]]; then
         --node-cache-ratio $NODE_CACHE_RATIO --snapshot-time-window $TIME_WINDOW \
         --ingestion-batch-size 10000000"
 else
-    cmd="python offline_edge_prediction.py --model $MODEL --data $DATA \
+    cmd="python offline_edge_prediction_pipethread.py --model $MODEL --data $DATA \
         --cache $CACHE --edge-cache-ratio $EDGE_CACHE_RATIO \
         --node-cache-ratio $NODE_CACHE_RATIO --snapshot-time-window $TIME_WINDOW \
         --ingestion-batch-size 10000000"
 fi
 
 echo $cmd
-OMP_NUM_THREADS=8 exec $cmd > ${MODEL}_${DATA}_${CACHE}_${EDGE_CACHE_RATIO}_${NODE_CACHE_RATIO}_${TIME_WINDOW}_pipethread_4000_nosync_pin.log 2>&1
+OMP_NUM_THREADS=8 exec $cmd > ${MODEL}_${DATA}_${NODE_CACHE_RATIO}_MSPipe.log 2>&1

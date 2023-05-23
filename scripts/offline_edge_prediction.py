@@ -29,7 +29,7 @@ from gnnflow.models.jodie import JODIE
 from gnnflow.temporal_sampler import TemporalSampler
 from gnnflow.utils import (DstRandEdgeSampler, EarlyStopMonitor, NegLinkSampler, allocate_pinned_memory_buffers,
                            build_dynamic_graph, get_pinned_buffers,
-                           get_project_root_dir, load_dataset, load_feat,
+                           get_project_root_dir, load_dataset, load_feat, load_most_similar,
                            mfgs_to_cuda, node_to_dgl_blocks)
 
 datasets = ['REDDIT', 'GDELT', 'LASTFM', 'MAG', 'MOOC', 'WIKI']
@@ -44,7 +44,7 @@ parser.add_argument("--model", choices=model_names, required=True,
 parser.add_argument("--data", choices=datasets, required=True,
                     help="dataset:" + '|'.join(datasets))
 parser.add_argument("--epoch", help="maximum training epoch",
-                    type=int, default=100)
+                    type=int, default=1)
 parser.add_argument("--lr", help='learning rate', type=float, default=0.0001)
 parser.add_argument("--num-workers", help="num workers for dataloaders",
                     type=int, default=8)
@@ -205,7 +205,7 @@ def main():
         args.local_rank = int(os.environ['LOCAL_RANK'])
         args.local_world_size = int(os.environ['LOCAL_WORLD_SIZE'])
         torch.cuda.set_device(args.local_rank)
-        torch.distributed.init_process_group('gloo')
+        torch.distributed.init_process_group('nccl')
         args.rank = torch.distributed.get_rank()
         args.world_size = torch.distributed.get_world_size()
     else:
@@ -442,6 +442,14 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
     #     gpu_load_thread.start()
 
     logging.info('Start training...')
+
+    most_similar = None
+    most_similar = load_most_similar('/home/gmsheng/repos/TGNN-Staleness/{}_most_similar.npy'.format(args.data))
+    most_similar = most_similar[:, 1:11]
+
+    deltas = torch.tensor([])
+    avg_cos_list = []
+    ind_result = []
     for e in range(args.epoch):
         model.train()
         cache.reset()
@@ -492,7 +500,7 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
                 b = mfgs[0][0]
                 if args.distributed:
                     memory_fetch_start_time = time.time()
-                    model.module.memory.prepare_input(b)
+                    model.module.memory.prepare_input(b, most_similar, ind_result)
                     total_memory_fetch_time += time.time() - memory_fetch_start_time
 
                     memory_update_start_time = time.time()
@@ -500,13 +508,16 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
                     total_memory_update_time += time.time() - memory_update_start_time
                 else:
                     memory_fetch_start_time = time.time()
-                    model.memory.prepare_input(b)
+                    model.memory.prepare_input(b, most_similar, ind_result)
                     total_memory_fetch_time += time.time() - memory_fetch_start_time
 
                     memory_update_start_time = time.time()
                     model.last_updated = model.memory_updater(b)
                     total_memory_update_time += time.time() - memory_update_start_time
 
+            # b = mfgs[0][0]
+            # delta_ts = (b.srcdata['ts'] - b.srcdata['mem_ts'])[:b.num_dst_nodes()]
+            # deltas = torch.cat((deltas, delta_ts.cpu()))
             # Train
             model_train_start_time = time.time()
             optimizer.zero_grad()
@@ -568,6 +579,18 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         memory_update_time_sum += total_memory_update_time
         memory_write_back_time_sum += total_memory_write_back_time
         model_train_time_sum += total_model_train_time
+
+        # logging.info('delta ts: {}'.format(deltas))
+        # np.save('{}_delta_t.npy'.format(args.data), deltas.numpy())
+
+        # if args.distributed:
+        #     memory = model.module.memory.node_memory
+        # else:
+        #     memory = model.memory.node_memory
+        
+        # np.save('{}_memory.npy'.format(args.data), memory.numpy())
+        # logging.info('ind_result: {}'.format(np.array(ind_result)))
+        # np.save('{}_ind.npy'.format(args.data), np.array(ind_result))
 
         # Validation
         val_start = time.time()
