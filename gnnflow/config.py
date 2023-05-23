@@ -38,7 +38,7 @@ _tgn_default_config = {
     "use_memory": True,
     "dim_time": 100,
     "dim_embed": 100,
-    "dim_memory": 172,
+    "dim_memory": 100,
     "batch_size": 600
 }
 
@@ -56,7 +56,7 @@ _apan_default_config = {
     "dim_time": 100,
     "dim_embed": 100,
     "dim_memory": 100,
-    "batch_size": 4000
+    "batch_size": 600
 }
 
 _jodie_default_config = {
@@ -73,7 +73,7 @@ _jodie_default_config = {
     "dim_time": 100,
     "dim_embed": 100,
     "dim_memory": 100,
-    "batch_size": 4000
+    "batch_size": 600
 }
 
 _tgat_default_config = {
@@ -183,7 +183,7 @@ _lastfm_default_config = {
     "minimum_block_size": 650,
     "blocks_to_preallocate": 1024,
     "insertion_policy": "insert",
-    "undirected": False,
+    "undirected": True,
     "node_feature": False,
     "edge_feature": True,
 }

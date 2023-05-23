@@ -43,6 +43,7 @@ class Memory:
         """
         if shared_memory:
             device = 'cpu'
+        device = 'cpu'
 
         self.num_nodes = num_nodes
         self.dim_edge = dim_edge
@@ -178,7 +179,7 @@ class Memory:
         self.mailbox.copy_(backup['mailbox'])
         self.mailbox_ts.copy_(backup['mailbox_ts'])
 
-    def prepare_input(self, b: DGLBlock):
+    def prepare_input(self, b: DGLBlock, most_similar: torch.Tensor = None):
         """
         Prepare the input for the memory module.
 
@@ -230,6 +231,97 @@ class Memory:
         b.srcdata['mem_ts'] = mem_ts[inv]
         b.srcdata['mail_ts'] = mail_ts[inv]
         b.srcdata['mem_input'] = mail[inv]
+
+        if most_similar is not None:
+
+            delta_ts = (b.srcdata['ts'] - b.srcdata['mem_ts'])[:b.num_dst_nodes()]
+            ID = b.srcdata['ID'][:b.num_dst_nodes()]
+            node_memory = b.srcdata['mem']
+            q = 0.99
+            source_delta_t = torch.quantile(delta_ts, q)
+            # index in the b.srcdata
+            ind_source = torch.where(delta_ts > source_delta_t)[0]
+            ind_source_id = b.srcdata['ID'][ind_source]
+
+            # random nodes
+            # random_nodes = torch.randint(0, len(most_similar), (10,))
+            # result = []
+            # ind_result = []
+            # for ind in zip(ind_source):
+            #     random_nodes = torch.randint(0, len(most_similar), (10,))
+            #     result.append(torch.sum(self.node_memory[random_nodes], dim=0, keepdim=True) / len(random_nodes))
+            #     # candidate = self.node_memory[candidate]
+            #     # logging.info('candidate: {}'.format(candidate))
+            #     # result.append(torch.sum(candidate, dim=0, keepdim=True) / len(candidate))
+            
+            # # logging.info('ind_result {}'.format(ind_result))
+            # if len(result) > 0:
+            #     ind_result = torch.tensor(ind_result)
+            #     compenstate = torch.stack(result).squeeze(dim=1).to(device)
+            #     # logging.info('result {}'.format(compenstate.shape))
+            #     # logging.info('b.srcdata: {}'.format(b.srcdata['mem'].shape))
+            #     b.srcdata['mem'][ind_source] = b.srcdata['mem'][ind_source] * 0.95 + compenstate * 0.05
+            # mitigate_candidate = random_nodes
+
+            # most_similar_nodes = most_similar.astype()
+            source_most_similar_nodes = most_similar[ind_source_id]
+            source_most_similar_mem_ts = self.node_memory_ts[source_most_similar_nodes]
+            source_ts = b.srcdata['mem_ts'][ind_source].unsqueeze(dim=1).cpu()
+            mask = source_most_similar_mem_ts > source_ts.view(-1, 1)
+            mitigate_candidate = [A_row[mask_row] for A_row, mask_row in zip(source_most_similar_nodes, mask)]
+
+            result = []
+            ind_result = []
+            l = 0.9
+            for ind, candidate in zip(ind_source, mitigate_candidate):
+                # logging.info('candidate: {}'.format(candidate))
+                if len(candidate) == 0:
+                    continue
+                else:
+                    ind_result.append(ind)
+                    result.append(torch.sum(self.node_memory[candidate], dim=0, keepdim=True) / len(candidate))
+                    # avg_cos_list.append(avg_cos)
+                # candidate = self.node_memory[candidate]
+                # logging.info('candidate: {}'.format(candidate))
+                # result.append(torch.sum(candidate, dim=0, keepdim=True) / len(candidate))
+         
+            # logging.info('ind_result {}'.format(ind_result))
+            if len(result) > 0:
+                ind_result = torch.tensor(ind_result)
+                compenstate = torch.stack(result).squeeze(dim=1).to(device)
+                # logging.info('result {}'.format(compenstate.shape))
+                # logging.info('b.srcdata: {}'.format(b.srcdata['mem'].shape))
+                b.srcdata['mem'][ind_result] = b.srcdata['mem'][ind_result] * l + compenstate * (1 - l)
+
+        # logging.info('enter')
+        # ts = b.srcdata['ts'].clone().detach()
+        # mem_ts = b.srcdata['mem_ts'].clone().detach()
+        # delta_ts = b.srcdata['ts'] - b.srcdata['mem_ts']
+        # q = 0.99
+        # source_delta_t = torch.quantile(delta_ts, q)
+        # index in the b.srcdata
+        # ind_source = torch.where(delta_ts > source_delta_t)[0]
+        # ts = (b.srcdata['ts'] - b.srcdata['mem_ts'])
+        # latest_id_index = torch.argsort(delta_ts)[:10]
+        # latest_id = b.srcdata['ID'][latest_id_index]
+        # latest_mem = b.srcdata['mem'][latest_id_index]
+        # compenstate = torch.sum(latest_mem, dim=0, keepdim=True) / 10
+        # b.srcdata['mem'][ind_source] = b.srcdata['mem'][ind_source] + compenstate * 0
+
+     
+        # candiddate = torch.where(source_most_similar_nodes > source_ts, source_most_similar_mem_ts)[0]
+        # logging.info('candiddate: {}'.format(candiddate.shape))
+        # logging.info('candiddate: {}'.format(candiddate))
+
+        # ts = (b.srcdata['ts'] - b.srcdata['mem_ts'])[:1800]
+        # latest_id_index = torch.argsort(delta_ts)[:10]
+        # latest_id = b.srcdata['ID'][latest_id_index]
+        # latest_mem = b.srcdata['mem'][latest_id_index]
+        # compenstate = torch.sum(latest_mem, dim=0, keepdim=True) / 10
+        # logging.info('ind_source: {}'.format(ind_source))
+        # b.srcdata['mem'][ind_source] = b.srcdata['mem'][ind_source] * 0.95 + compenstate * 0.05
+
+  
         # if int(os.environ['LOCAL_RANK']) == 0:
         # logging.info('fetch {}th mem at iter: {}'.format(self.i, i))
         # if int(os.environ['LOCAL_RANK']) == 0:

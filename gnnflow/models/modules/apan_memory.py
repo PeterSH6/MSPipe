@@ -44,6 +44,7 @@ class Memory:
         """
         if shared_memory:
             device = 'cpu'
+        device = 'cpu'
 
         self.num_nodes = num_nodes
         self.dim_edge = dim_edge
@@ -195,7 +196,7 @@ class Memory:
         self.mailbox_ts.copy_(backup['mailbox_ts'])
         self.next_mail_pos.copy_(backup['next_mail_pos'])
 
-    def prepare_input(self, b: DGLBlock):
+    def prepare_input(self, b: DGLBlock, most_similar=None):
         """
         Prepare the input for the memory module.
 

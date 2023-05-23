@@ -343,6 +343,13 @@ def load_feat(dataset: str, data_dir: Optional[str] = None,
 
     return node_feats, edge_feats
 
+def load_most_similar(path):
+    if not os.path.exists(path):
+            raise ValueError('{} does not exist'.format(path))
+    most_similar = np.load(path, allow_pickle=True)
+    most_similar = torch.tensor(most_similar)
+    logging.info('most_similar {}'.format(most_similar.shape))
+    return most_similar
 
 class DstRandEdgeSampler:
     """

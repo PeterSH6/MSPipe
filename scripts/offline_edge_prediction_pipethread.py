@@ -35,7 +35,7 @@ from gnnflow.models.jodie import JODIE
 from gnnflow.temporal_sampler import TemporalSampler
 from gnnflow.utils import (DstRandEdgeSampler, EarlyStopMonitor, allocate_pinned_apan_memory_buffers, allocate_pinned_memory_buffers,
                            build_dynamic_graph, get_pinned_buffers,
-                           get_project_root_dir, load_dataset, load_feat,
+                           get_project_root_dir, load_dataset, load_feat, load_most_similar,
                            mfgs_to_cuda, node_to_dgl_blocks)
 from scripts.pipeline import feature_fetching, gnn_training, memory_fetching, memory_update, sample
 from scripts.train import training_batch
@@ -52,7 +52,7 @@ parser.add_argument("--model", choices=model_names, required=True,
 parser.add_argument("--data", choices=datasets, required=True,
                     help="dataset:" + '|'.join(datasets))
 parser.add_argument("--epoch", help="maximum training epoch",
-                    type=int, default=10)
+                    type=int, default=100)
 parser.add_argument("--lr", help='learning rate', type=float, default=0.0001)
 parser.add_argument("--num-workers", help="num workers for dataloaders",
                     type=int, default=8)
@@ -408,8 +408,11 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     criterion = torch.nn.BCEWithLogitsLoss()
 
+    # most_similar = None
+    # most_similar = load_most_similar('/home/gmsheng/repos/TGNN-Staleness/{}_most_similar_2.npy'.format(args.data))
+    # most_similar = most_similar[:, 0:10]
     best_e = train(train_loader, val_loader, sampler,
-                   model, optimizer, criterion, cache, device,test_loader)
+                   model, optimizer, criterion, cache, device,test_loader, most_similar)
 
     logging.info('Loading model at epoch {}...'.format(best_e))
     ckpt = torch.load(checkpoint_path)
@@ -447,7 +450,7 @@ iter_mem_update = 0
 # global iter_mem_update
 
 def train(train_loader, val_loader, sampler, model, optimizer, criterion,
-          cache, device, test_loader):
+          cache, device, test_loader, most_similar=None):
     global training
     best_ap = 0
     best_e = 0
@@ -464,16 +467,15 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
     start_thread_sum = 0
 
     # create threadpool
-    num_process = 5
-    # pool = ThreadPool(processes=num_process)
-    # pool = ThreadPoolExecutor(max_workers=num_process)
+    num_process = 3
     stream_pool = [torch.cuda.Stream(device=device, priority=0)
                    for _ in range(num_process)]
 
     lock_pool = [Lock() for _ in range(5)]  # 5 stages
-    signal_queue = Queue(maxsize=num_process)
+    signal_queue = Queue(maxsize=4)
     # signal_queue.put(1)
     # model_lock = Lock()
+    avg_cos_list = []
 
     logging.info('Start training...')
     for e in range(args.epoch):
@@ -502,19 +504,11 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
 
     
         for i, (target_nodes, ts, eid) in enumerate(train_loader):
-            
-            # signal_queue.put(1)
-            # lock_pool[0].acquire()
             # training_batch(model, sampler, cache, target_nodes,
-            #                ts, eid, device, args.distributed, optimizer, criterion, stream_pool[i % num_process], signal_queue, lock_pool, i, args.rank)
-            # training_batch(model, sampler, cache, target_nodes,
-            #                                        ts, eid, device, args.distributed, optimizer, criterion, stream_pool[i % num_process], signal_queue, lock_pool, i, args.rank)
+                                                #    ts, eid, device, args.distributed, optimizer, criterion, stream_pool[i % num_process], signal_queue, lock_pool, i, args.rank, most_similar)
             pool.apply_async(training_batch, args=(model, sampler, cache, target_nodes,
-                                                   ts, eid, device, args.distributed, optimizer, criterion, stream_pool[i % num_process], signal_queue, lock_pool, i, args.rank))
+                                                   ts, eid, device, args.distributed, optimizer, criterion, stream_pool[i % num_process], signal_queue, lock_pool, i, args.rank, most_similar))
 
-        # while True:
-        #     if signal_queue.empty():
-        #         break
         pool.close()
         pool.join()
 
@@ -522,6 +516,12 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
         epoch_time_sum += epoch_time
 
         # logging.info("epoch time: {}".format(epoch_time))
+        # if args.distributed:
+        #     memory = model.module.memory.node_memory
+        # else:
+        #     memory = model.memory.node_memory
+        
+        # np.save('{}_memory_pipethread.npy'.format(args.data), memory.numpy())
 
         # Validation
         val_start = time.time()
