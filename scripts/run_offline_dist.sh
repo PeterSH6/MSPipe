@@ -4,8 +4,8 @@ INTERFACE="enp225s0"
 MODEL=$1
 DATA=$2
 CACHE="${3:-LRUCache}"
-EDGE_CACHE_RATIO="${4:-0}" # default 20% of cache
-NODE_CACHE_RATIO="${5:-0}" # default 20% of cache
+EDGE_CACHE_RATIO="${4:-0}" # default 0% of cache
+NODE_CACHE_RATIO="${5:-0}" # default 0% of cache
 
 HOST_NODE_ADDR=10.28.1.31
 HOST_NODE_PORT=29400
@@ -30,7 +30,7 @@ cmd="torchrun \
     --rdzv_conf is_host=$IS_HOST \
     offline_edge_prediction_pipethread.py --model $MODEL --data $DATA \
     --cache $CACHE --edge-cache-ratio $EDGE_CACHE_RATIO --node-cache-ratio $NODE_CACHE_RATIO\
-    --ingestion-batch-size 10000000"
+    --ingestion-batch-size 10000000 --epoch 10"
 
 rm -rf /dev/shm/rmm_pool_*
 rm -rf /dev/shm/edge_feats
