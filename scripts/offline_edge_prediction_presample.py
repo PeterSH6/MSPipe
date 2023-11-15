@@ -519,6 +519,21 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
                     model.last_updated = model.memory_updater(b)
                     total_memory_update_time += time.time() - memory_update_start_time
 
+            if args.use_memory:
+                # NB: no need to do backward here
+                with torch.no_grad():
+                    # use one function
+                    memory_write_back_start_time = time.time()
+                    if args.distributed:
+                        model.module.memory.update_mem_mail(
+                            **model.module.last_updated, edge_feats=cache.target_edge_features,
+                            neg_sample_ratio=1, block=block)
+                    else:
+                        model.memory.update_mem_mail(
+                            **model.last_updated, edge_feats=cache.target_edge_features,
+                            neg_sample_ratio=1, block=block)
+                    total_memory_write_back_time += time.time() - memory_write_back_start_time
+            
             # Train
             model_train_start_time = time.time()
             optimizer.zero_grad()
@@ -530,21 +545,6 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
             loss.backward()
             optimizer.step()
             total_model_train_time += time.time() - model_train_start_time
-
-            if args.use_memory:
-                # NB: no need to do backward here
-                with torch.no_grad():
-                    # use one function
-                    memory_write_back_start_time = time.time()
-                    if args.distributed:
-                        model.module.memory.update_mem_mail(
-                            **model.module.last_updated, edge_feats=cache.target_edge_features.get(),
-                            neg_sample_ratio=1, block=block)
-                    else:
-                        model.memory.update_mem_mail(
-                            **model.last_updated, edge_feats=cache.target_edge_features.get(),
-                            neg_sample_ratio=1, block=block)
-                    total_memory_write_back_time += time.time() - memory_write_back_start_time
 
             cache_edge_ratio_sum += cache.cache_edge_ratio
             cache_node_ratio_sum += cache.cache_node_ratio
