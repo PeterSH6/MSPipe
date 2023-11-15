@@ -515,21 +515,6 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
                     model.last_updated = model.memory_updater(b)
                     total_memory_update_time += time.time() - memory_update_start_time
 
-            # b = mfgs[0][0]
-            # delta_ts = (b.srcdata['ts'] - b.srcdata['mem_ts'])[:b.num_dst_nodes()]
-            # deltas = torch.cat((deltas, delta_ts.cpu()))
-            # Train
-            model_train_start_time = time.time()
-            optimizer.zero_grad()
-            pred_pos, pred_neg = model(mfgs)
-
-            loss = criterion(pred_pos, torch.ones_like(pred_pos))
-            loss += criterion(pred_neg, torch.zeros_like(pred_neg))
-            total_loss += float(loss) * len(target_nodes)
-            loss.backward()
-            optimizer.step()
-            total_model_train_time += time.time() - model_train_start_time
-
             if args.use_memory:
                 # NB: no need to do backward here
                 with torch.no_grad():
@@ -544,6 +529,21 @@ def train(train_loader, val_loader, sampler, model, optimizer, criterion,
                             **model.last_updated, edge_feats=cache.target_edge_features,
                             neg_sample_ratio=1, block=block)
                     total_memory_write_back_time += time.time() - memory_write_back_start_time
+            
+            # b = mfgs[0][0]
+            # delta_ts = (b.srcdata['ts'] - b.srcdata['mem_ts'])[:b.num_dst_nodes()]
+            # deltas = torch.cat((deltas, delta_ts.cpu()))
+            # Train
+            model_train_start_time = time.time()
+            optimizer.zero_grad()
+            pred_pos, pred_neg = model(mfgs)
+
+            loss = criterion(pred_pos, torch.ones_like(pred_pos))
+            loss += criterion(pred_neg, torch.zeros_like(pred_neg))
+            total_loss += float(loss) * len(target_nodes)
+            loss.backward()
+            optimizer.step()
+            total_model_train_time += time.time() - model_train_start_time
 
             cache_edge_ratio_sum += cache.cache_edge_ratio
             cache_node_ratio_sum += cache.cache_node_ratio
