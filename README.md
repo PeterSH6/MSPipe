@@ -1,6 +1,6 @@
 # MSPipe
 
-This repository is the official implementation of MSPipe: Minimal Staleness Pipeline for Scalable Temporal GNN Training
+This repository is the official implementation of MSPipe: Efficient Temporal GNN Training via Staleness-aware Pipeline
 
 ## Install
 
